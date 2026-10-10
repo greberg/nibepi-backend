@@ -298,8 +298,10 @@ const updateConfig = (data) => {
 }
 
 let core;
+const reportedMissing = new Set();
 const resetCore = () => {
     model = "";
+    reportedMissing.clear();
     register = [];
     firmware = "";
 }
@@ -751,7 +753,12 @@ function getData(address) {
         }
             
     } else {
-        console.log('Register('+address+') not in database');
+        // Logged once per register: request nodes for other models ask for
+        // these on every poll.
+        if(!reportedMissing.has(String(address))) {
+            reportedMissing.add(String(address));
+            console.log('Register('+address+') not in database - not available on this model, further requests are not logged');
+        }
         return;
     }
 }
