@@ -252,9 +252,8 @@ function analyzeData(data) {
                         }, err => {
                             err = Array.from(err);
                             busStats.chksum++;
-                            console.log(`CHKSUM ERROR: ${err}`)
                             if(process.connected===true) {
-                                process.send({type:"log",data:err,level:"error",kind:"CHKSUM"});
+                                process.send({type:"log",data:err,level:"debug",kind:"CHKSUM"});
                             }
                             myPort.write(nack);
                         })

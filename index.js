@@ -27,7 +27,7 @@ const startCore = Core.startCoreF;
 const startNibeGW = Core.startNibeGW;
 const stopCoreProcess = require(__dirname+'/lib/stopCore');
 const Lease = require(__dirname+'/lib/lease');
-var log = require('./log');
+const log = require('./log');
 let model = "";
 let rmu = {};
 let firmware = "";
@@ -46,9 +46,9 @@ const configFile = path+'/config.json';
 if (!fs.existsSync(path)) {
     try {
         fs.mkdirSync(path, {recursive:true});
-        console.log(`Configuration directory created ${path}`);
+        log.info('Config',`Configuration directory created ${path}`);
     } catch(e) {
-        console.error(`[nibepi] Could not create the configuration directory ${path}: ${e.message}`);
+        log.error('Config',`Could not create the configuration directory ${path}: ${e.message}`);
     }
 }
 const readJSON = (file) => JSON.parse(fs.readFileSync(file,'utf8'));
@@ -68,19 +68,19 @@ function loadConfig() {
         error = e;
     }
     if(error.code==='ENOENT' && !fs.existsSync(configFile+'.bak')) {
-        console.log('Config file not found, loading default.');
+        log.info('Config',`${configFile} not found, creating it from the defaults`);
         configNeedsSave = true;
         return readJSON(__dirname+'/default.json');
     }
-    console.error(`[nibepi] ${configFile} could not be read: ${error.message}`);
+    log.error('Config',`${configFile} could not be read: ${error.message}`);
     configNeedsSave = true;
     try {
         let conf = readJSON(configFile+'.bak');
-        console.error(`[nibepi] Settings restored from ${configFile}.bak`);
+        log.error('Config',`Settings restored from ${configFile}.bak`);
         configLoadFault = 'Inställningsfilen var skadad, inställningarna är återställda från säkerhetskopian.';
         return conf;
     } catch(e) {
-        console.error(`[nibepi] ${configFile}.bak could not be read either (${e.message}). ALL SETTINGS ARE RESET TO DEFAULTS.`);
+        log.error('Config',`${configFile}.bak could not be read either (${e.message}). ALL SETTINGS ARE RESET TO DEFAULTS.`);
     }
     let kept = '';
     if(fs.existsSync(configFile)) {
@@ -88,10 +88,10 @@ function loadConfig() {
         try {
             fs.renameSync(configFile, corrupt);
             kept = ` Den skadade filen är sparad som ${corrupt}.`;
-            console.error(`[nibepi] The unreadable config file was moved to ${corrupt}`);
+            log.error('Config',`The unreadable config file was moved to ${corrupt}`);
         } catch(e) {
             // writeFileAtomic moves it aside when it saves.
-            console.error(`[nibepi] Could not move the unreadable config file aside: ${e.message}`);
+            log.error('Config',`Could not move the unreadable config file aside: ${e.message}`);
         }
     }
     configLoadFault = 'Inställningsfilen var skadad och kunde inte återställas, standardinställningar används.'+kept;
@@ -141,14 +141,10 @@ const writeFileAtomic = async (file,text) => {
 config = loadConfig();
 // Sections the code reads without checking; an old or hand-edited file may
 // lack them. Unknown keys are kept as they are.
-for (const key of ['connection','serial','mqtt','system','log','home','gateway']) {
+for (const key of ['connection','serial','mqtt','system','home','gateway']) {
     if(config[key]===null || typeof config[key]!=='object' || Array.isArray(config[key])) config[key] = {};
 }
 if(!Array.isArray(config.registers)) config.registers = [];
-// Mark where each run starts and ends, so the log can be read from a restart.
-// Written whenever file logging is on, whatever the categories. The stop line
-// relies on log.js writing synchronously: nothing asynchronous runs on 'exit'.
-const logEnabled = () => config!==undefined && config.log!==undefined && config.log.enable===true;
 // Replacement for .catch(console.log) on fire-and-forget reqData calls: no
 // stack traces, nothing while the pump has not announced its model yet, and
 // the same message at most once a minute (a noisy RS485 bus otherwise floods
@@ -162,7 +158,7 @@ const logCatch = (err) => {
     if (seen && now - seen.at < 60000) { seen.skipped++; return; }
     const skipped = seen && seen.skipped ? ` (repeated ${seen.skipped} times in the last minute)` : '';
     logCatchSeen.set(msg, { at: now, skipped: 0 });
-    console.warn(`[nibepi] ${msg}${skipped}`);
+    log.warn('Read',`${msg}${skipped}`);
 };
 // F-series reads made before the pump has announced its model used to fail
 // at once with 'Heatpump is not ready yet.', so every caller started at
@@ -190,9 +186,11 @@ const modelKnown = () => {
         waiter.resolve();
     }
 };
-log(logEnabled(),`NibePi ${nibepi_version} starting`,true,"System");
+// Mark where each run starts and ends. The stop line relies on log.js
+// writing synchronously: nothing asynchronous runs on 'exit'.
+log.info('System',`NibePi ${nibepi_version} starting`);
 process.on('exit', (code) => {
-    log(logEnabled(),`NibePi stopping (exit code ${code})`,true,"System");
+    log.info('System',`NibePi stopping (exit code ${code})`);
 });
 var timer;
 // Called after config has been changed in place: the lease baselines are
@@ -207,22 +205,20 @@ const scheduleConfigSave = () => {
     if(timer!==undefined) clearTimeout(timer);
     timer = setTimeout(() => {
         saveConfig().catch((err) => {
-            console.log('[nibepi] Could not save the config file: '+(err && err.message ? err.message : err));
+            log.error('Config','Could not save the config file: '+(err && err.message ? err.message : err));
         });
     }, 5000);
 }
 const saveConfig = () => queueDisk(async () => {
-    if(config.system===undefined) config.system = {};
-    if(config.log===undefined) config.log = {};
     const text = JSON.stringify(config,null,2);
     if(text.length<=2) return false;
     let saved = false;
     try {
         await writeFileAtomic(configFile,text);
         saved = true;
-        log(config.log.enable,"Config file saved",config.log['info'],"Config");
+        log.info('Config',"Config file saved");
     } catch(err) {
-        log(config.log.enable,err,config.log['error'],"Config");
+        log.error('Config',err);
     }
     return saved;
 });
@@ -270,8 +266,7 @@ const onBusStats = (stats) => {
     }
     if(busHealth.errors>0) {
         const text = `Bus last minute: ${busHealth.ok} ok, ${busHealth.chksum} CHKSUM, ${busHealth.no_respond} No respond`;
-        console.log(text);
-        if(config!==undefined && config.log!==undefined) log(config.log.enable,text,config.log['info'],"Bus");
+        log.info('Bus',text);
     }
     // Bus watchdog: a running core that decodes no valid frame for several
     // minutes has most likely lost the serial port without noticing.
@@ -307,7 +302,7 @@ const handlerFaultSeen = new Map();
 const reportHandlerError = (err) => {
     const msg = err && err.message ? err.message : String(err);
     logCatch(new Error('Error handling data from the core: '+msg));
-    if(config!==undefined && config.log!==undefined) log(config.log.enable,'Error handling data from the core: '+(err && err.stack ? err.stack : msg),config.log['error'],"Core");
+    log.debug('Core','Error handling data from the core: '+(err && err.stack ? err.stack : msg));
     const now = Date.now();
     const at = handlerFaultSeen.get(msg);
     if(at!==undefined && now-at<60000) return;
@@ -318,8 +313,7 @@ const reportHandlerError = (err) => {
 const restartCore = (message) => {
     const child = core;
     const gen = coreGen;
-    console.log(message);
-    if(config!==undefined && config.log!==undefined) log(config.log.enable,message,config.log['error'],"Core");
+    log.error('Core',message);
     nibeEmit.emit('fault',{from:"core",message:message});
     // A 'fault' listener may already have stopped and restarted the core.
     if(gen!==coreGen || child===undefined || child.exitCode!==null || child.signalCode!==null) return;
@@ -329,7 +323,7 @@ const restartCore = (message) => {
 const superviseCore = (child,gen) => {
     // Without a listener a failed send to a dead core would throw.
     child.on('error', (err) => {
-        console.log('Core process error: '+err.message);
+        log.error('Core','Core process error: '+err.message);
     });
     child.once('exit', (code,signal) => {
         if(gen!==coreGen || coreWanted!==true) return; // stopped on purpose
@@ -339,8 +333,7 @@ const superviseCore = (child,gen) => {
         const delay = restartDelay;
         restartDelay = Math.min(restartDelay*2, RESTART_MAX_MS);
         const text = `Core exited unexpectedly (code ${code}, signal ${signal}), restarting in ${delay/1000} s`;
-        console.log(text);
-        if(config!==undefined && config.log!==undefined) log(config.log.enable,text,config.log['error'],"Core");
+        log.error('Core',text);
         resetCore();
         // Scheduled before the fault is emitted: a 'fault' listener that
         // restarts the core itself calls stopCore, which cancels this timer.
@@ -365,14 +358,13 @@ const stopCore = (child) => {
     return stopCoreProcess(core);
 }
 const initiateCore = (host,port,cb) => {
-    if(config.log===undefined) config.log = {};
     if(configLoadFault!==undefined) {
         // Delayed so the caller's 'fault' listeners are attached.
         const text = configLoadFault;
         configLoadFault = undefined;
         setTimeout(() => {
             nibeEmit.emit('fault',{from:"Inställningar",message:text});
-            log(config.log.enable,text,config.log['error'],"Config");
+            log.error('Config',text);
         }, 10000);
     }
     coreArgs = {host:host,port:port,cb:cb};
@@ -380,6 +372,8 @@ const initiateCore = (host,port,cb) => {
     clearTimeout(restartTimer);
     forkCore();
 }
+// Log levels the cores use; 'core' is every raw frame on the bus.
+const coreLogLevel = (level) => level==='core' ? 'trace' : (log.LEVELS[level]!==undefined ? level : 'info');
 // Forks the core for the current config, from initiateCore and on restarts.
 const forkCore = () => {
     const host = coreArgs.host;
@@ -427,7 +421,7 @@ const forkCore = () => {
     start.then(result => {
         if(adopt(result)===false) return;
         if(mode==="serial" && config.system.rmu_emulation===false) {
-            console.log('RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
+            log.info('RMU40','RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
             core.send({type:"rmuEmulation",data:false});
         }
         core.on('message', fromCore((m) => {
@@ -435,7 +429,7 @@ const forkCore = () => {
                 markData();
                 let n = m.data;
                 announcment(m, (err,ready) => {
-                    if(err) console.log(err);
+                    if(err) log.error('Pump',err);
                     if(ready===true) cb(null,result);
                 });
                 if(mode==="serial") decodeRMU(n);
@@ -447,7 +441,7 @@ const forkCore = () => {
             } else if(m.type=="busStats") {
                 onBusStats(m.data);
             } else if(m.type=="log") {
-                log(config.log.enable,m.data,config.log[m.level],m.kind);
+                log.write(coreLogLevel(m.level),m.kind,m.data);
             }
         }));
     });
@@ -510,8 +504,7 @@ const announcment = (msg,cb) => {
             // every frame, and keep model empty: no table, no model.
             cachedModelFailed = true;
             let text = `Heatpump is not supported ${config.system.pump}, waiting for the pump to announce its model`;
-            console.log(text);
-            log(config.log.enable,text,config.log['error'],"Pump");
+            log.error('Pump',text);
             nibeEmit.emit('fault',{from:"Värmepump",message:`Värmepumpen ${config.system.pump} i inställningarna stöds inte, väntar på att pumpen presenterar sig.`});
             return cb(null,false);
         }
@@ -519,9 +512,7 @@ const announcment = (msg,cb) => {
         firmware = config.system.firmware;
         modelKnown();
         cb(null,true)
-        console.log(`Nibe ${model} connected`);
-        console.log(`Firmware ${firmware}`);
-        console.log(`Register is set. Length: ${register.length}`)
+        log.info('Pump',`Nibe ${model} connected, firmware ${firmware}, ${register.length} registers`);
         
     } else if(msg.data[3]==109) {
         
@@ -530,7 +521,7 @@ const announcment = (msg,cb) => {
             reqData(45001).then(atad => {
                 let data = Object.assign({}, atad);
                 if(data!==undefined && data.raw_data===251) {
-                    console.log('Resetting alarm.')
+                    log.info('Pump','Resetting the MODBUS alarm (251)');
                     setData(45171,1);
                 }
             }).catch(logCatch)
@@ -543,17 +534,14 @@ const announcment = (msg,cb) => {
                     if(unsupportedModel!==announced.model) {
                         unsupportedModel = announced.model;
                         let text = `Heatpump ${announced.model} is not supported (${err.message})`;
-                        console.log(text);
-                        log(config.log.enable,text,config.log['error'],"Pump");
+                        log.error('Pump',text);
                         nibeEmit.emit('fault',{from:"Värmepump",message:`Värmepumpen ${announced.model} stöds inte.`});
                     }
                     return cb(null,false);
                 }
                 modelKnown();
                 cb(null,true)
-                console.log(`${model} connected`);
-                console.log(`Firmware ${firmware}`);
-                console.log(`Register is set. Length: ${register.length}`)
+                log.info('Pump',`Nibe ${model} connected, firmware ${firmware}, ${register.length} registers`);
             });
         } else {
             // Model and firmware are cached in config.system and used from there at
@@ -563,17 +551,15 @@ const announcment = (msg,cb) => {
                 if(announcedModel!==announced.model) {
                     announcedModel = announced.model;
                     let text = `The pump announces itself as ${announced.model}, but the register map loaded is ${model}. Restart NibePi after removing system.pump and system.firmware from config.json.`;
-                    console.log(text);
+                    log.error('Pump',text);
                     nibeEmit.emit('fault',{from:"Värmepump",message:text});
-                    log(config.log.enable,text,config.log['error'],"Pump");
                 }
             } else if(announced.firmware!==Number(firmware)) {
                 let text = `Pump firmware changed from ${firmware} to ${announced.firmware}`;
                 firmware = announced.firmware;
                 config.system.firmware = firmware;
                 updateConfig();
-                console.log(text);
-                log(config.log.enable,text,config.log['info'],"Pump");
+                log.info('Pump',text);
                 scheduleDiscovery();
             }
         }
@@ -595,11 +581,11 @@ const announcment = (msg,cb) => {
                 }
             }
             if(msg.rmu===true) {
-                console.log('RMU40 System '+((-24)+msg.data[2])+' connected (read-only mode)');
+                log.info('RMU40','RMU40 System '+((-24)+msg.data[2])+' connected (read-only mode)');
             } else {
-                console.log('RMU40 System '+((-24)+msg.data[2])+' connected');
+                log.info('RMU40','RMU40 System '+((-24)+msg.data[2])+' connected');
             }
-            console.log(`Register is set. Length: ${register.length}`)
+            log.debug('RMU40',`Register is set. Length: ${register.length}`);
             cb(null,false)
 
         }
@@ -694,8 +680,7 @@ const logRefusal = (address,text) => {
     const at = refusalSeen.get(key);
     if(at!==undefined && now-at<60000) return;
     refusalSeen.set(key,now);
-    console.log('[nibepi] Write refused: '+text);
-    if(config.log!==undefined) log(config.log.enable,'Write refused: '+text,config.log['error'],"Gateway");
+    log.warn('Gateway','Write refused: '+text);
 }
 // opts.lease marks the lease module's own writes. While a register is leased
 // they are the only ones accepted, so two controllers cannot fight over it.
@@ -709,7 +694,7 @@ const setData = (address,value,cb=()=>{},opts) => {
     };
     const refused = leaseRefusal();
     if(refused!==null) return cb(refused);
-    console.log(`Setting data in register ${address}: ${value}`)
+    log.info('Write',`Setting data in register ${address}: ${value}`);
     let done = false;
     let waitTimer;
     let ackTimer;
@@ -773,7 +758,7 @@ function getData(address) {
         // these on every poll.
         if(!reportedMissing.has(String(address))) {
             reportedMissing.add(String(address));
-            console.log('Register('+address+') not in database - not available on this model, further requests are not logged');
+            log.warn('Register','Register('+address+') not in database - not available on this model, further requests are not logged');
         }
         return;
     }
@@ -837,12 +822,12 @@ function setDataValue(incoming) {
             let check = checkWriteValue(item,incoming.value);
             if(check.code===-4) {
                 nibeEmit.emit('fault',{from:"Skicka värde",message:'Ogiltigt värde ('+incoming.value+') till register '+incoming.register+', skickas inte.'});
-                log(config.log.enable,'Invalid value ('+incoming.value+') to register '+incoming.register+', not sent',config.log['error'],"Data");
+                log.error('Data','Invalid value ('+incoming.value+') to register '+incoming.register+', not sent');
                 return -4;
             }
             if(check.code===-3) {
                 nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+check.value+') utanför giltigt värde som får skickas.'});
-                log(config.log.enable,'Data ('+check.value+') out of range, to register '+incoming.register,config.log['error'],"Data");
+                log.error('Data','Data ('+check.value+') out of range, to register '+incoming.register);
                 return -3;
             }
             incoming.value = check.raw;
@@ -889,16 +874,16 @@ function setDataValue(incoming) {
                 data[8] = ((incoming.value >> 24) & 0xFF);
                 data[9] = Calc_CRC(data);
             }
-            log(config.log.enable,`Sending data: ${incoming.register}, ${incoming.value}, ${JSON.stringify(data)}`,config.log['info'],"Data");
+            log.debug('Data',`Sending data: ${incoming.register}, ${incoming.value}, ${JSON.stringify(data)}`);
             return data.length===0 ? rmu : data;
         } else {
             nibeEmit.emit('fault',{from:"Skicka värde",message:'Register('+incoming.register+') går ej att skriva till.'});
-            log(config.log.enable,'Register('+incoming.register+') not allowed write access',config.log['error'],"Data");
+            log.error('Data','Register('+incoming.register+') not allowed write access');
             return -2;
         }
     } else {
         nibeEmit.emit('fault',{from:"Skicka värde",message:'Register('+incoming.register+') finns ej i databasen.'});
-        log(config.log.enable,'Register('+incoming.register+') not in database',config.log['error'],"Data");
+        log.error('Data','Register('+incoming.register+') not in database');
         return -1;
     }
 }
@@ -924,7 +909,7 @@ const addRegister = (address,logset=false) => {
         if(register[index]!==undefined) register[index].logset = logset;
         let confIndex = config.registers.findIndex(confIndex => confIndex == address);
         if(confIndex===-1) {
-            log(config.log.enable,`Adding register ${address}`,config.log['info'],"Register");
+            log.info('Register',`Adding register ${address}`);
             config.registers.push(address);
             if(logset===false) {
                 addRegular(address);
@@ -1056,12 +1041,12 @@ const addRegular = (address) => {
     let index = regQueue.findIndex(item => item.toString() === stringed);
     if(index===-1) {
         if(address.toString().charAt(0)=="1") {
-            log(config.log.enable,`RMU register not added to regular list, Register: ${address}`,config.log['debug'],"Register");
+            log.debug('Register',`RMU register not added to regular list, Register: ${address}`);
         } else {
             // Req data change
             reqData(address).catch(logCatch)
             regQueue.push(getData(address));
-            log(config.log.enable,`Regular register added (${address})`,config.log['info'],"Register");
+            log.info('Register',`Regular register added (${address})`);
             core.send({type:"regRegister",data:regQueue});
         }
         
@@ -1081,7 +1066,7 @@ const removeRegular = (address) => {
         let value = regQueue[i].toString();
         if(stringed===value) {
             regQueue.splice(i,1)
-            log(config.log.enable,`Regular register removed (${address})`,config.log['info'],"Register");
+            log.info('Register',`Regular register removed (${address})`);
             core.send({type:"regRegister",data:regQueue});
         }
     }
@@ -1196,7 +1181,7 @@ const decodeMessage = (buf) => {
                 if (min !== 0 || max !== 0) {
                     if ((data > max / register[index].factor) || (data < min / register[index].factor)) {
                         nibeEmit.emit('fault',{from:"Datahantering",message:'Korrupt värde från register '+address+", Värde: "+data+register[index].unit});
-                        log(config.log.enable,register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit,config.log['error'],"CORRUPT");
+                        log.error('CORRUPT',register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit);
                         corruptData = true;
                     }
                 }
@@ -1216,8 +1201,8 @@ const decodeMessage = (buf) => {
                 publishMQTT(config.mqtt.topic+address+"/json",JSON.stringify(register[index]))
                 publishMQTT(config.mqtt.topic+address+"/raw",register[index].raw_data)
                 publishMQTT(config.mqtt.topic+address,register[index].data)
-                log(config.log.enable,JSON.stringify(register[index]),config.log['debug'],"Data");
-                log(config.log.enable,register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit,config.log['debug'],"Data");
+                log.debug('Data',JSON.stringify(register[index]));
+                log.debug('Data',register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit);
             }
             address = undefined;
         } else {
@@ -1273,7 +1258,7 @@ function startMQTT(host,port,user,pass) {
     client.on('connect', function () {
         if(client!==mqtt_client) return;
         mqttErrorShown = false;
-        console.log("MQTT Broker is connected.")
+        log.info('MQTT','MQTT broker is connected');
         client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
         client.subscribe('homeassistant/status');
         client.subscribe(config.mqtt.topic+'#');
@@ -1286,14 +1271,14 @@ function startMQTT(host,port,user,pass) {
         resolve(client);
     });
     client.on('close',function(err){
-        console.log("MQTT Broker is disconnected")
+        log.info('MQTT','MQTT broker is disconnected');
     });
     // Not ended on error: the broker may simply start after the gateway, and the
     // client keeps retrying. Reported once until the next successful connect.
     client.on('error',function(error){
         if(client===mqtt_client && mqttErrorShown===false) {
             mqttErrorShown = true;
-            console.log("Could not connect to MQTT broker: "+(error && error.message ? error.message : error))
+            log.error('MQTT','Could not connect to MQTT broker: '+(error && error.message ? error.message : error));
         }
         reject(error);
       });
@@ -1355,7 +1340,7 @@ function publishDiscovery() {
         let hasId = config.system!==undefined && config.system.id!==undefined && config.system.id!==0 && config.system.id!=="";
         if(discovery.cleared!==true && hasId) {
             publishMQTT('homeassistant/device/'+discoveryId()+'/config','',true);
-            log(config.log.enable,`Removed MQTT Discovery device`,config.log['info'],"MQTT");
+            log.info('MQTT',`Removed MQTT Discovery device`);
         }
         discovery.cleared = true;
         return;
@@ -1374,7 +1359,7 @@ function publishDiscovery() {
     publishMQTTpromise(topic,JSON.stringify(message),true).then(() => {
         discovery.cleared = false;
         discovery.removed = {};
-        log(config.log.enable,`Published MQTT Discovery device, ${Object.keys(discovery.components).length} sensors`,config.log['info'],"MQTT");
+        log.info('MQTT',`Published MQTT Discovery device, ${Object.keys(discovery.components).length} sensors`);
     },(error => {}));
 }
 function addMQTTdiscovery(data) {
@@ -1419,7 +1404,7 @@ function clearOldDiscovery(topic,message) {
         let old = JSON.parse(message.toString());
         if(old.state_topic===config.mqtt.topic+match[1] && old.unique_id===undefined) {
             publishMQTT(topic,'',true);
-            log(config.log.enable,`Cleared old MQTT Discovery object, register ${match[1]}`,config.log['info'],"MQTT");
+            log.info('MQTT',`Cleared old MQTT Discovery object, register ${match[1]}`);
         }
     } catch(e) {}
 }
@@ -1489,7 +1474,7 @@ function onMQTTMessage(topic, message, packet) {
             const refused = Lease.rawSetRefusal(gatewayConfig().raw_set,topic[0],leases.ownerOf(topic[0]));
             if(refused!==null) return logRefusal(topic[0],'raw /set: '+refused);
             setData(topic[0],message.toString(),(err,result) => {
-                if(err) return console.log(err);
+                if(err) return log.warn('Write',err);
             });
         } else if(topic.includes('get')) {
             reqData(topic[0]).catch(logCatch);
@@ -1513,7 +1498,7 @@ const handleMQTT = (on,host,port,user,pass,cb=()=>{}) => {
             mqtt_client.end();
             mqtt_client = undefined;
             mqttKey = undefined;
-            console.log('Terminated MQTT session, shutdown');
+            log.info('MQTT','Terminated MQTT session');
         }
         return cb(null,false)
     };
@@ -1524,11 +1509,11 @@ const handleMQTT = (on,host,port,user,pass,cb=()=>{}) => {
         return cb(null,mqtt_client.connected===true);
     }
     if(mqtt_client!==undefined) {
-        console.log('MQTT settings changed, reconnecting');
+        log.info('MQTT','MQTT settings changed, reconnecting');
         mqtt_client.end();
         mqtt_client = undefined;
     }
-    console.log('Startar MQTT')
+    log.info('MQTT',`Connecting to MQTT broker ${host}:${port}`);
     mqttKey = key;
     mqttErrorShown = false;
     startMQTT(host,port,user,pass).then(() => {
@@ -1567,8 +1552,7 @@ const gatewayConfig = () => {
     return config.gateway;
 }
 const gatewayLog = (message) => {
-    console.log('[nibepi] '+message);
-    if(config.log!==undefined) log(config.log.enable,message,config.log['info'],"Gateway");
+    log.info('Gateway',message);
 }
 const publishLeaseState = (reg,state) => {
     publishMQTT(config.mqtt.topic+'lease/'+reg+'/state',JSON.stringify(state),true);

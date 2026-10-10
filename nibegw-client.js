@@ -159,7 +159,7 @@ function start() {
         }
         if(!validFrame(message)) {
             if(process.connected===true) {
-                process.send({type:"log",data:Array.from(message),level:"error",kind:"CHKSUM"});
+                process.send({type:"log",data:Array.from(message),level:"debug",kind:"CHKSUM"});
             }
             return;
         }
