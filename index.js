@@ -88,6 +88,22 @@ config = requireF(path+'/config.json');
 // Written whenever file logging is on, whatever the categories. The stop line
 // relies on log.js writing synchronously: nothing asynchronous runs on 'exit'.
 const logEnabled = () => config!==undefined && config.log!==undefined && config.log.enable===true;
+// Replacement for .catch(console.log) on fire-and-forget reqData calls: no
+// stack traces, nothing while the pump has not announced its model yet, and
+// the same message at most once a minute (a noisy RS485 bus otherwise floods
+// the log with identical "No respond" lines). Same behaviour as the
+// logCatch helper in node-red-contrib-nibepi's config_node.js.
+const logCatchSeen = new Map();
+const logCatch = (err) => {
+    const msg = err && err.message ? err.message : String(err);
+    if (msg === 'Heatpump is not ready yet.') return;
+    const now = Date.now();
+    const seen = logCatchSeen.get(msg);
+    if (seen && now - seen.at < 60000) { seen.skipped++; return; }
+    const skipped = seen && seen.skipped ? ` (repeated ${seen.skipped} times in the last minute)` : '';
+    logCatchSeen.set(msg, { at: now, skipped: 0 });
+    console.warn(`[nibepi] ${msg}${skipped}`);
+};
 log(logEnabled(),`NibePi ${nibepi_version} starting`,true,"System");
 process.on('exit', (code) => {
     log(logEnabled(),`NibePi stopping (exit code ${code})`,true,"System");
@@ -461,7 +477,7 @@ const announcment = (msg,cb) => {
                     console.log('Resetting alarm.')
                     setData(45171,1);
                 }
-            }).catch(console.log)
+            }).catch(logCatch)
         }
         
         //console.log(`Announcement message`);
@@ -674,7 +690,7 @@ const setData = (address,value,cb=()=>{}) => {
                 core.send({type:"rmuSet",data:output});
             } else {
                 core.send({type:"setData",data:output});
-                reqData(address).catch(console.log)
+                reqData(address).catch(logCatch)
             }
             
         }
@@ -689,7 +705,7 @@ const setData = (address,value,cb=()=>{}) => {
                         core.send({type:"rmuSet",data:data});
                     } else {
                         core.send({type:"setData",data:data});
-                        reqData(address).catch(console.log)
+                        reqData(address).catch(logCatch)
                     }
                 }
             }
@@ -969,7 +985,7 @@ const addRegular = (address) => {
             log(config.log.enable,`RMU register not added to regular list, Register: ${address}`,config.log['debug'],"Register");
         } else {
             // Req data change
-            reqData(address).catch(console.log)
+            reqData(address).catch(logCatch)
             regQueue.push(getData(address));
             log(config.log.enable,`Regular register added (${address})`,config.log['info'],"Register");
             core.send({type:"regRegister",data:regQueue});
@@ -1473,7 +1489,7 @@ const handleMQTT = (on,host,port,user,pass,cb) => {
                             if(err) return console.log(err);
                         });
                     } else if(topic.includes('get')) {
-                        reqData(topic[0]).catch(console.log);
+                        reqData(topic[0]).catch(logCatch);
                     } else if(topic.includes('add')) {
                         addRegister(topic[0])
                     } else if(topic.includes('remove')) {
