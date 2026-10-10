@@ -9,6 +9,26 @@ var red = false;
 var regQueue = [];
 var regCount = 0;
 let checkACK = {};
+// FIFO with one entry per register, as in backend.js: a newer write to a
+// register replaces the queued one, so the last value set is what the pump
+// ends up with. Capped so it cannot grow without bound.
+const QUEUE_MAX = 100;
+const writeAddress = (msg) => (msg[4] * 256 + msg[3]);
+function queueWrite(queue, msg) {
+    const address = writeAddress(msg);
+    const index = queue.findIndex(queued => writeAddress(queued) === address);
+    if(index!==-1) {
+        queue[index] = msg;
+        return;
+    }
+    queue.push(msg);
+    if(queue.length>QUEUE_MAX) {
+        const dropped = queue.shift();
+        if(process.connected===true) {
+            process.send({type:"log",data:`Write queue full, dropped the oldest write to register ${writeAddress(dropped)}`,level:"error",kind:"Queue"});
+        }
+    }
+}
 process.on('message', (m) => {
     if(m.start===true) {
         if(m.port!==undefined) {
@@ -33,7 +53,7 @@ process.on('message', (m) => {
         }
         ;
     } else if(m.type=="setData") {
-        sendQueue.push(m.data);
+        queueWrite(sendQueue, m.data);
     } else if(m.type=="regRegister") {
         regQueue = m.data;
     } else if(m.type=="red") {
@@ -146,7 +166,7 @@ const makeResponse = (data) => {
     // Write to heatpump
     } else if(data[3]==107 && data[4]==0x00) {
         if(sendQueue.length!==0) {
-            var lastMsg = sendQueue.pop();
+            var lastMsg = sendQueue.shift();
             if(lastMsg!==undefined) {
                 let address = (lastMsg[4] * 256 + lastMsg[3]);
                 if(process.connected===true) {

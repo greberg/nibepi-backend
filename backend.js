@@ -52,6 +52,27 @@ let checkACK = {};
 // system.rmu_emulation=false in config.json it never answers - for a bus
 // with a physical RMU40 that the auto-detection misses.
 let rmuEmulation = true;
+// Write queues are FIFO with one entry per register: a newer write to a
+// register replaces the queued one in place, so the last value set is the one
+// the pump ends up with. Capped so a pump that never offers write slots
+// cannot grow them without bound.
+const QUEUE_MAX = 100;
+const writeAddress = (msg) => (msg[4] * 256 + msg[3]);
+function queueWrite(queue, msg, addressOf, kind) {
+    const address = addressOf(msg);
+    const index = queue.findIndex(queued => addressOf(queued) === address);
+    if(index!==-1) {
+        queue[index] = msg;
+        return;
+    }
+    queue.push(msg);
+    if(queue.length>QUEUE_MAX) {
+        const dropped = queue.shift();
+        if(process.connected===true) {
+            process.send({type:"log",data:`${kind} queue full, dropped the oldest write to register ${addressOf(dropped)}`,level:"error",kind:"Queue"});
+        }
+    }
+}
 // Bus health: good and corrupted frames, reported to index.js once a minute.
 const busStats = {ok:0, chksum:0};
 setInterval(() => {
@@ -86,9 +107,9 @@ process.on('message', (m) => {
         }
         ;
     } else if(m.type=="setData") {
-        sendQueue.push(m.data);
+        queueWrite(sendQueue, m.data, writeAddress, "setData");
     } else if(m.type=="rmuSet") {
-        rmuQueue.push(m.data);
+        queueWrite(rmuQueue, m.data, (msg) => msg.address, "rmuSet");
     } else if(m.type=="regRegister") {
         regQueue = m.data;
     } else if(m.type=="red") {
@@ -252,7 +273,9 @@ const makeResponse = (data) => {
         if(data[3]==0x60) { // Send data message
             if(checkACK[data[2]]===false) {
             if(rmuQueue.length!==0) {
-                var lastMsg = rmuQueue.pop();
+                // Oldest queued write for this RMU slot, if any.
+                let slotIndex = rmuQueue.findIndex(queued => Number(queued.ackback[2])==Number(data[2]));
+                var lastMsg = slotIndex!==-1 ? rmuQueue.splice(slotIndex, 1)[0] : undefined;
                 if(lastMsg!==undefined) {
                     if(Number(lastMsg.ackback[2])==Number(data[2])) {
                         let address = lastMsg.address;
@@ -268,7 +291,6 @@ const makeResponse = (data) => {
                         }
                         myPort.write(lastMsg.data);
                     } else {
-                        rmuQueue.push(lastMsg);
                         myPort.write(ack);
                         resolve(data);
                     }
@@ -356,7 +378,7 @@ const makeResponse = (data) => {
     // Write to heatpump
     } else if(data[3]==107 && data[4]==0x00) {
         if(sendQueue.length!==0) {
-            var lastMsg = sendQueue.pop();
+            var lastMsg = sendQueue.shift();
             if(lastMsg!==undefined) {
                 let address = (lastMsg[4] * 256 + lastMsg[3]);
                 if(process.connected===true) {
