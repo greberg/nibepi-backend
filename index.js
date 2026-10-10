@@ -335,6 +335,10 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
         if(config.connection.enable=="serial") {
             startCore(port).then(result => {
                 core = result;
+                if(config.system!==undefined && config.system.rmu_emulation===false) {
+                    console.log('RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
+                    core.send({type:"rmuEmulation",data:false});
+                }
                 
                 core.on('message', (m) => {
                     if(m.type=="data") {

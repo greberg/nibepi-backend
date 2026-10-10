@@ -47,6 +47,11 @@ var rmu_start = false;
 let other_start = false;
 var startReset = true;
 let checkACK = {};
+// RMU40 emulation. NibePi answers the pump as RMU40 unless another device
+// on the bus answers first (then that address is read-only). With
+// system.rmu_emulation=false in config.json it never answers - for a bus
+// with a physical RMU40 that the auto-detection misses.
+let rmuEmulation = true;
 process.on('message', (m) => {
     if(m.start===true) {
         if(m.port!==undefined) {
@@ -81,6 +86,11 @@ process.on('message', (m) => {
         regQueue = m.data;
     } else if(m.type=="red") {
         red = m.data;
+    } else if(m.type=="rmuEmulation") {
+        rmuEmulation = m.data!==false;
+        if(rmuEmulation===false) {
+            for (const address of Object.keys(checkACK)) checkACK[address] = true;
+        }
     }
   });
   process.on('disconnect', (m) => {
@@ -152,7 +162,7 @@ function analyzeData(data) {
                                         msgOut = Buffer.alloc(0)
                                         fs_start = false;
                                     } else {
-                                        checkACK[msgOut[2]] = false;
+                                        checkACK[msgOut[2]] = (rmuEmulation===false);
                                         msgOut = Buffer.alloc(0)
                                         fs_start = false;
                                     }
