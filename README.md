@@ -139,7 +139,7 @@ contract, including the rationale for leases, is in
 | `Tbus_health` | gateway →, per minute | JSON: `ok, chksum, no_respond, errors, timestamp` |
 | `Tlease/<reg>/set` | → gateway, **not retained** | `{"value": -2, "ttl": 900, "owner": "ha"}` |
 | `Tlease/<reg>/release` | → gateway, not retained | anything |
-| `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, owner, error` |
+| `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, neutral_from, owner, error` |
 | `Tgateway/state` | gateway →, retained, per minute | `version, leases, raw_set, core, lastData` |
 | `homeassistant/device/nibepi_<id>/config` | gateway →, retained | discovery, when `mqtt.discovery` is `true` |
 
@@ -151,12 +151,15 @@ contract, including the rationale for leases, is in
   - hot water comfort mode 47041 and hot water period 47134
   - temporary lux 48132
   - the cut-off frequency registers 48659–48664
+  - the RMU40 room temperature 10060/10160/10260/10360 for systems 1–4 (see
+    below)
 
   To change the table, set `gateway.leases` to
-  `{"<reg>": {"min", "max", "neutral", "min_interval"}}`. Entries merge over
-  the defaults, and `null` removes one.
+  `{"<reg>": {"min", "max", "neutral", "neutral_from", "min_interval"}}`.
+  Entries merge over the defaults, and `null` removes one. `neutral_from` is
+  a register that is read fresh from the pump at restore time and written.
 - **First request.** The gateway reads the current value from the pump as the
-  baseline and persists it.
+  baseline and persists it. A `neutral_from` lease needs no baseline.
 - **Writes.** A value is written only when it changes, at most once per
   `min_interval`; the last value wins. `ttl` is clamped to 60..3600 s.
 - **Expiry and release.** Without renewal the lease expires, and the gateway
@@ -169,6 +172,16 @@ contract, including the rationale for leases, is in
 - **Before the model is known.** Until the pump has announced its model,
   requests are rejected with `Heatpump is not ready yet.`; retry on the next
   tick.
+
+**RMU40 room temperature.** Home Assistant can feed a room sensor to the
+pump through the emulated RMU40 room unit, by leasing 10060 (system 1) with
+the temperature in °C, one decimal, 5..35. The register exists only after the
+pump has polled that RMU40 (menu 5.2, and `system.rmu_emulation` on); until
+then the lease is rejected with `RMU40 S1 is not connected: ...`, and with
+`RMU40 S1 is read-only ...` when another RMU40 answers. On expiry or release
+the gateway reads the room sensor setpoint (47398 for system 1) and writes
+it: room temperature equal to the setpoint means no room correction, so the
+pump never keeps acting on a frozen reading.
 
 ### Raw `/set` policy
 
