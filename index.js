@@ -417,6 +417,21 @@ const resetCore = () => {
     regQueue.length = 0;
     rmu = {};
     announcedModel = undefined;
+    cachedModelFailed = false;
+    unsupportedModel = undefined;
+}
+// Errors thrown while handling core messages: logged, and shown as a fault
+// at most once a minute per message.
+const handlerFaultSeen = new Map();
+const reportHandlerError = (err) => {
+    const msg = err && err.message ? err.message : String(err);
+    logCatch(new Error('Error handling data from the core: '+msg));
+    if(config!==undefined && config.log!==undefined) log(config.log.enable,'Error handling data from the core: '+(err && err.stack ? err.stack : msg),config.log['error'],"Core");
+    const now = Date.now();
+    const at = handlerFaultSeen.get(msg);
+    if(at!==undefined && now-at<60000) return;
+    handlerFaultSeen.set(msg,now);
+    nibeEmit.emit('fault',{from:"Datahantering",message:'Fel vid hantering av data från kärnan: '+msg});
 }
 // Kill the running core on purpose (watchdog); the exit handler restarts it.
 const restartCore = (message) => {
@@ -534,7 +549,12 @@ const forkCore = () => {
     // are dropped.
     const fromCore = (handler) => (m) => {
         if(gen!==coreGen) return;
-        handler(m);
+        // An exception here would otherwise take Node-RED down with it.
+        try {
+            handler(m);
+        } catch(err) {
+            reportHandlerError(err);
+        }
     };
     let forked = false;
 
@@ -682,40 +702,63 @@ const parsePump = (data) => {
     return {model:name[0].replace(",",""), firmware:(data[6]*256)+data[7]};
 }
 let announcedModel;
+let cachedModelFailed = false; // cached system.pump has no usable register table
+let unsupportedModel;          // announced model without a register table, reported once
+// Adds a model's register table to register; throws, leaving register
+// untouched, when there is no usable table for it.
+const loadModel = (name) => {
+    if(!/^[A-Za-z0-9_]+$/.test(String(name))) throw new Error(`Unknown model name ${name}`);
+    let reg = require(`./models/${name}.json`);
+    if(!Array.isArray(reg) || reg.length===0) throw new Error(`No registers for ${name}`);
+    for (i = 0; i < reg.length; i = i + 1) {
+        let found = false;
+        for (j = 0; j < register.length; j = j + 1) {
+            if(register[j].register===reg[i].register) {
+                found = true;
+            }
+        }
+        if(found===false) {
+            register.push(reg[i])
+        }
+    }
+}
 const announcment = (msg,cb) => {
+    // The model is only persisted once its register table has loaded, so an
+    // unsupported pump is not cached in config.json.
     const checkPump = (data,callback) => {
         let announced = parsePump(data);
+        try {
+            loadModel(announced.model);
+        } catch(err) {
+            return callback(err,announced);
+        }
         model = announced.model;
         firmware = announced.firmware;
         config.system.pump = model;
         config.system.firmware = firmware;
         updateConfig(config);
-        callback(null);
+        callback(null,announced);
         }
-    if(model=="" && config.system.pump!==undefined && config.system.pump!=="" && config.system.firmware!==undefined && config.system.firmware!=="") {
+    if(model=="" && cachedModelFailed===false && config.system!==undefined && config.system.pump!==undefined && config.system.pump!=="" && config.system.firmware!==undefined && config.system.firmware!=="") {
+        try {
+            loadModel(config.system.pump);
+        } catch(err) {
+            // Wait for the pump's own announcement instead of retrying on
+            // every frame, and keep model empty: no table, no model.
+            cachedModelFailed = true;
+            let text = `Heatpump is not supported ${config.system.pump}, waiting for the pump to announce its model`;
+            console.log(text);
+            log(config.log.enable,text,config.log['error'],"Pump");
+            nibeEmit.emit('fault',{from:"Värmepump",message:`Värmepumpen ${config.system.pump} i inställningarna stöds inte, väntar på att pumpen presenterar sig.`});
+            return cb(null,false);
+        }
         model = config.system.pump;
         firmware = config.system.firmware;
-        try {
-            let reg = require(`./models/${model}.json`);
-            for (i = 0; i < reg.length; i = i + 1) {
-                let found = false;
-                for (j = 0; j < register.length; j = j + 1) {
-                    if(register[j].register===reg[i].register) {
-                        found = true;
-                    }
-                }
-                if(found===false) {
-                    register.push(reg[i])
-                }
-            }
-            modelKnown();
-            cb(null,true)
-            console.log(`Nibe ${model} connected`);
-            console.log(`Firmware ${firmware}`);
-            console.log(`Register is set. Length: ${register.length}`)
-        } catch(err) {
-            console.log(`Heatpump is not supported ${model}`)
-        }
+        modelKnown();
+        cb(null,true)
+        console.log(`Nibe ${model} connected`);
+        console.log(`Firmware ${firmware}`);
+        console.log(`Register is set. Length: ${register.length}`)
         
     } else if(msg.data[3]==109) {
         
@@ -732,19 +775,16 @@ const announcment = (msg,cb) => {
         
         //console.log(`Announcement message`);
         if(model=="") {
-            checkPump(msg.data, function(err) { 
-                if(err) throw err;
-                let reg = require(`./models/${model}.json`);
-                for (i = 0; i < reg.length; i = i + 1) {
-                    let found = false;
-                    for (j = 0; j < register.length; j = j + 1) {
-                        if(register[j].register===reg[i].register) {
-                            found = true;
-                        }
+            checkPump(msg.data, function(err,announced) { 
+                if(err) {
+                    if(unsupportedModel!==announced.model) {
+                        unsupportedModel = announced.model;
+                        let text = `Heatpump ${announced.model} is not supported (${err.message})`;
+                        console.log(text);
+                        log(config.log.enable,text,config.log['error'],"Pump");
+                        nibeEmit.emit('fault',{from:"Värmepump",message:`Värmepumpen ${announced.model} stöds inte.`});
                     }
-                    if(found===false) {
-                        register.push(reg[i])
-                    }
+                    return cb(null,false);
                 }
                 modelKnown();
                 cb(null,true)
