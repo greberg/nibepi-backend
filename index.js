@@ -28,6 +28,9 @@ const startNibeGW = Core.startNibeGW;
 const stopCoreProcess = require(__dirname+'/lib/stopCore');
 const Lease = require(__dirname+'/lib/lease');
 const log = require('./log');
+// Mark where each run starts and ends. The stop line relies on log.js
+// writing synchronously: nothing asynchronous runs on 'exit'.
+log.info('System',`NibePi ${nibepi_version} starting`);
 let model = "";
 let rmu = {};
 let firmware = "";
@@ -188,9 +191,6 @@ const modelKnown = () => {
         waiter.resolve();
     }
 };
-// Mark where each run starts and ends. The stop line relies on log.js
-// writing synchronously: nothing asynchronous runs on 'exit'.
-log.info('System',`NibePi ${nibepi_version} starting`);
 process.on('exit', (code) => {
     log.info('System',`NibePi stopping (exit code ${code})`);
 });
