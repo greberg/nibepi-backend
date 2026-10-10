@@ -1668,6 +1668,10 @@ function startMQTT(host,port,user,pass) {
         client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
         client.subscribe('homeassistant/status');
         client.subscribe(config.mqtt.topic+'#');
+        // Every lease register, so a retained state left from before an
+        // outage is overwritten with the current one.
+        publishGatewayState();
+        leases.publishAll(true);
         cleanOldDiscovery();
         scheduleDiscovery();
         if(firstConnect===true) {
@@ -1696,9 +1700,9 @@ function startMQTT(host,port,user,pass) {
         reject(error);
       });
     // Registered once per client, so each message is handled once.
-    client.on('message', function (topic, message) {
+    client.on('message', function (topic, message, packet) {
         if(client!==mqtt_client) return;
-        onMQTTMessage(topic, message);
+        onMQTTMessage(topic, message, packet);
     });
 })
 }
@@ -1821,9 +1825,24 @@ function clearOldDiscovery(topic,message) {
         }
     } catch(e) {}
 }
+// <topic>lease/<reg>/set|release. Retained requests are ignored: the broker
+// replays them on every reconnect, which would renew a lease its owner has
+// stopped renewing, or release one it still holds.
+function onLeaseMessage(topic, message, packet) {
+    if(topic.length!==3 || !/^\d+$/.test(topic[1])) return;
+    const reg = topic[1];
+    const action = topic[2];
+    if(action!=='set' && action!=='release') return; // incl. our own .../state
+    if(packet!==undefined && packet.retain===true) {
+        if(message.length!==0) logRefusal('lease'+reg,`retained lease/${reg}/${action} ignored, lease requests must not be retained`);
+        return;
+    }
+    const job = action==='set' ? leases.acquire(reg,message) : leases.release(reg);
+    job.catch(err => gatewayLog(`Lease ${reg}: ${err && err.message ? err.message : err}`));
+}
 // Incoming MQTT messages: Home Assistant status, old discovery objects,
-// subscribed sensors and <topic><register>/set|get|add|remove.
-function onMQTTMessage(topic, message) {
+// subscribed sensors, leases and <topic><register>/set|get|add|remove.
+function onMQTTMessage(topic, message, packet) {
     if(topic==='homeassistant/status') {
         if(message.toString()==='online') scheduleDiscovery();
         return;
@@ -1850,7 +1869,14 @@ function onMQTTMessage(topic, message) {
     if(subscribed===false && topic.includes(subTopic)) {
         topic = topic.replace(config.mqtt.topic,'')
         topic = topic.split('/');
-        if(topic[0]=="adjust_s1") {
+        // Before the generic handlers: lease/47011/set is no raw set of a
+        // register called "lease", and the gateway's own retained state
+        // topics come back through the <topic># subscription.
+        if(topic[0]==="lease") {
+            onLeaseMessage(topic, message, packet);
+        } else if(topic[0]==="gateway") {
+            // gateway/state, published here
+        } else if(topic[0]=="adjust_s1") {
             if(topic.includes('set')) {
                 // Stored as a number: a Buffer here broke Number(adjust_s1) later.
                 let value = parseWriteValue(message);
@@ -1877,6 +1903,8 @@ function onMQTTMessage(topic, message) {
                 if(config.home!==undefined) publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
             }
         } else if(topic.includes('set')) {
+            const refused = Lease.rawSetRefusal(gatewayConfig().raw_set,topic[0],leases.ownerOf(topic[0]));
+            if(refused!==null) return logRefusal(topic[0],'raw /set: '+refused);
             setData(topic[0],message.toString(),(err,result) => {
                 if(err) return console.log(err);
             });
@@ -2051,6 +2079,18 @@ const gatewayLog = (message) => {
 const publishLeaseState = (reg,state) => {
     publishMQTT(config.mqtt.topic+'lease/'+reg+'/state',JSON.stringify(state),true);
 }
+// Retained summary for the HA component: which leases are held and whether
+// the core is getting data.
+const publishGatewayState = () => {
+    const rawSet = gatewayConfig().raw_set;
+    publishMQTT(config.mqtt.topic+'gateway/state',JSON.stringify({
+        version: nibepi_version,
+        leases: leases.summary(),
+        raw_set: rawSet===undefined ? "all" : rawSet,
+        core: coreState,
+        lastData: lastData
+    }),true);
+}
 // Register leases (lib/lease.js). Created last, once everything it calls is
 // defined. Baselines go to config.gateway.baselines only on acquire and
 // restore, never on renewals: every save is an SD card write.
@@ -2086,6 +2126,11 @@ leases = new Lease.LeaseManager({
         setTimeout(() => nibeEmit.emit('fault',{from:"Gateway",message:text}), 10000);
     }
 }
+// Lease states at least once a minute while active, as the contract says.
+let gatewayTimer = setInterval(() => {
+    publishGatewayState();
+    leases.publishAll();
+}, 60000);
 module.exports = {
     reqData:reqData,
     setData:setData,
