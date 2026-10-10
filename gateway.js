@@ -1,61 +1,106 @@
 #!/usr/bin/env node
 'use strict';
-// NibePi as a standalone gateway, without Node-RED: the core on the serial
-// port (or NibeGW / Modbus TCP), MQTT, register leases and the health file.
-// Control logic lives elsewhere (Home Assistant) and talks to it over MQTT;
-// the leases keep the pump safe on their own when that side disappears.
+// NibePi gateway: the core on the RS485 serial port (or a NibeGW), MQTT,
+// register leases and the health file. Control logic lives elsewhere (the
+// nibepi Home Assistant component) and talks to it over MQTT; the leases
+// keep the pump safe on their own when that side disappears.
 //
-//   node gateway.js        (npm run gateway)
+//   node gateway.js        (npm start)
 //
-// Settings come from /etc/nibepi/config.json as for the Node-RED setup.
-// Logs go to stdout.
+// Settings come from <NIBEPI_CONFIG_DIR>/config.json (default /etc/nibepi),
+// created from default.json on the first run, with the NIBEPI_* environment
+// variables in lib/env.js on top. Logs go to stdout/stderr.
 const fs = require('fs');
+const Env = require('./lib/env');
+const log = require('./log');
 const nibe = require('./index.js');
 
-const HEALTH_FILE = '/dev/shm/nibepi-health.json';
+const HEALTH_FILE = Env.healthFile();
 const HEALTH_MS = 60000;
 const STOP_TIMEOUT_MS = 10000;
-
-const ensure = (config, key) => {
-    if(config[key]===null || typeof config[key]!=='object') config[key] = {};
-    return config[key];
-};
+const NIBEGW_LISTEN_PORT = 9999;
 
 nibe.data.on('fault', (data) => {
     if(data===undefined || data===null) return;
-    console.log(`[fault] ${data.from}: ${data.message}`);
+    log.warn(data.from, data.message);
 });
 
-// Same steps as handleCore in node-red-contrib-nibepi's config_node.js, for
-// the first start only: the backend supervises and restarts the core itself.
+function applyEnvironment() {
+    const env = Env.readOverrides(process.env);
+    for (const error of env.errors) log.error('Config', error);
+    if(env.errors.length!==0) return false;
+    nibe.applyOverrides(env.overrides);
+    const names = env.overrides.filter(o => !(o.path[0]==='mqtt' && o.path[1]==='enable')).map(o => o.path.join('.'));
+    log.info('Config', `Config file ${nibe.getConfigFile()}`+(names.length!==0 ? `, from the environment: ${names.join(', ')}` : ''));
+    log.info('Config', `Log level ${log.levelName()}, health file ${HEALTH_FILE}`);
+    return true;
+}
+
+// The first start only: the backend supervises and restarts the core itself.
 function startCore() {
     const config = nibe.getConfig();
-    const connection = config.connection;
-    const serial = config.serial;
-    console.log(`Connection: ${connection.enable}`);
+    const mode = config.connection.enable===undefined ? 'serial' : config.connection.enable;
     const onReady = (err) => {
-        if(err) console.log(err);
-        console.log(`Nibe ${nibe.getConfig().system.pump} is connected`);
+        if(err) log.error('Core', err);
+        log.info('Core', `Nibe ${nibe.getConfig().system.pump} is connected`);
     };
-    if(serial.port!==undefined && serial.port!=="" && (connection.enable==="serial" || connection.enable==="nibegw")) {
-        nibe.initiateCore(null, serial.port, onReady);
+    if(mode==='serial') {
+        const port = typeof config.serial.port==='string' ? config.serial.port.trim() : '';
+        if(port==='') {
+            log.error('Config', 'No serial port: set NIBEPI_SERIAL_PORT or serial.port');
+            return false;
+        }
+        if(!fs.existsSync(port)) {
+            log.warn('Core', `Serial port ${port} does not exist, the core keeps retrying until it appears`);
+        }
+        log.info('Core', `Starting the core on serial port ${port}`);
+        nibe.initiateCore(null, port, onReady);
         return true;
     }
+    if(mode==='nibegw') {
+        const gw = config.nibegw!==null && typeof config.nibegw==='object' ? config.nibegw : {};
+        // Older configs kept the NibeGW host in serial.port.
+        const host = typeof gw.host==='string' && gw.host.trim()!=='' ? gw.host.trim()
+            : (typeof config.serial.port==='string' ? config.serial.port.trim() : '');
+        const listen = Number(gw.port);
+        const port = Number.isInteger(listen) && listen>0 && listen<=65535 ? listen : NIBEGW_LISTEN_PORT;
+        if(host==='') {
+            log.error('Config', 'No NibeGW host: set NIBEPI_NIBEGW_HOST or nibegw.host');
+            return false;
+        }
+        log.info('Core', `Starting the NibeGW client for ${host}, listening on UDP ${port}`);
+        nibe.initiateCore(host, port, onReady);
+        return true;
+    }
+    log.error('Config', `connection.enable "${mode}" is not supported, use serial or nibegw (Modbus TCP was removed, see the nodered-final tag)`);
     return false;
 }
 
+// MQTT is on when a broker host is set (NIBEPI_MQTT_HOST or mqtt.host),
+// unless config.json says mqtt.enable false and the environment does not
+// set a host.
 function startMQTT() {
-    const config = nibe.getConfig();
-    const mqtt = ensure(config, 'mqtt');
+    const mqtt = nibe.getConfig().mqtt;
     // Every gateway topic, leases included, hangs off this prefix.
     if(typeof mqtt.topic!=='string' || mqtt.topic==='') mqtt.topic = 'nibe/modbus/';
-    nibe.handleMQTT(mqtt.enable, mqtt.host, mqtt.port, mqtt.user, mqtt.pass, (err) => {
-        if(err) console.log(`MQTT: ${err.message ? err.message : err}`);
+    const host = typeof mqtt.host==='string' ? mqtt.host.trim() : '';
+    if(host==='') {
+        log.warn('MQTT', 'No MQTT host (NIBEPI_MQTT_HOST or mqtt.host), MQTT is off');
+        return;
+    }
+    if(mqtt.enable===false) {
+        log.warn('MQTT', 'mqtt.enable is false in config.json, MQTT is off');
+        return;
+    }
+    const port = mqtt.port===undefined || mqtt.port===null || mqtt.port==='' ? 1883 : mqtt.port;
+    nibe.handleMQTT(true, host, port, mqtt.user, mqtt.pass, (err) => {
+        if(err) log.error('MQTT', err.message ? err.message : err);
     });
 }
 
-// Same format as config_node.js writes it, so the Docker HEALTHCHECK works
-// for both; there are no Node-RED controllers here.
+// Same format config_node.js used, so the Docker HEALTHCHECK keeps working;
+// there are no controllers here.
+let healthErrorShown = false;
 function writeHealth() {
     let health;
     try { health = nibe.getHealth(); } catch(err) { health = {}; }
@@ -69,9 +114,17 @@ function writeHealth() {
         controllers: {}
     };
     const tmp = HEALTH_FILE+'.tmp';
+    const failed = (err) => {
+        if(healthErrorShown===true) return;
+        healthErrorShown = true;
+        log.warn('Health', `Could not write ${HEALTH_FILE} (set NIBEPI_HEALTH_FILE): ${err.message}`);
+    };
     fs.writeFile(tmp, JSON.stringify(out), (err) => {
-        if(err) return; // no /dev/shm outside Linux
-        fs.rename(tmp, HEALTH_FILE, () => {});
+        if(err) return failed(err);
+        fs.rename(tmp, HEALTH_FILE, (err) => {
+            if(err) return failed(err);
+            healthErrorShown = false;
+        });
     });
 }
 
@@ -82,37 +135,36 @@ let stopping = false;
 function stop(signal) {
     if(stopping===true) return;
     stopping = true;
-    console.log(`${signal} received, stopping the gateway`);
+    log.info('System', `${signal} received, stopping the gateway`);
     clearInterval(healthTimer);
     setTimeout(() => {
-        console.log('Stop timed out, exiting');
+        log.error('System', 'Stop timed out, exiting');
         process.exit(1);
     }, STOP_TIMEOUT_MS).unref();
     nibe.shutdown().then(() => {
-        console.log('Gateway stopped');
+        log.info('System', 'Gateway stopped');
         process.exit(0);
     }, (err) => {
-        console.log(`Error while stopping: ${err && err.message ? err.message : err}`);
+        log.error('System', `Error while stopping: ${err && err.message ? err.message : err}`);
         process.exit(1);
     });
 }
 process.on('SIGTERM', () => stop('SIGTERM'));
 process.on('SIGINT', () => stop('SIGINT'));
 process.on('unhandledRejection', (reason) => {
-    console.log(`Unhandled rejection: ${reason && reason.stack ? reason.stack : reason}`);
+    log.error('System', `Unhandled rejection: ${reason && reason.stack ? reason.stack : reason}`);
 });
 // Unknown state: exit and let the supervisor (Docker, systemd) restart us.
 // The leases survive that through their persisted baselines.
 process.on('uncaughtException', (err) => {
-    console.log(`Uncaught exception: ${err && err.stack ? err.stack : err}`);
+    log.error('System', `Uncaught exception: ${err && err.stack ? err.stack : err}`);
     process.exit(1);
 });
 
-if(startCore()!==true) {
-    console.log('No usable connection in config.json: set connection.enable to serial or nibegw, and serial.port');
+if(applyEnvironment()!==true || startCore()!==true) {
     process.exit(1);
 }
 startMQTT();
 healthTimer = setInterval(writeHealth, HEALTH_MS);
 writeHealth();
-console.log('NibePi gateway started');
+log.info('System', 'NibePi gateway started');

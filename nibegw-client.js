@@ -34,10 +34,11 @@ process.on('message', (m) => {
     if(m.start===true) {
         if(m.port!==undefined) {
             HOST = m.port;
+            if(Number.isInteger(Number(m.listenPort)) && Number(m.listenPort)>0) PORT = Number(m.listenPort);
             start()
         } else {
             if(process.connected===true) {
-                process.send({type:"log",data:'Error starting backend, no serial port specified',level:"error",kind:"Serialport"});
+                process.send({type:"log",data:'Error starting the NibeGW client, no host specified',level:"error",kind:"NibeGW"});
 	        console.log('Error in the core');
 }
         }

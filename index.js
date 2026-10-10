@@ -40,9 +40,11 @@ const regQueue = [];
 const EventEmitter = require('events').EventEmitter
 const nibeEmit = new EventEmitter();
 const fs = require('fs');
-const path = "/etc/nibepi"
+const Env = require(__dirname+'/lib/env');
+// NIBEPI_CONFIG_DIR, default /etc/nibepi. The gateway always runs with a
+// writable config directory.
+const path = Env.configDir();
 const configFile = path+'/config.json';
-// The gateway always runs with a writable config directory.
 if (!fs.existsSync(path)) {
     try {
         fs.mkdirSync(path, {recursive:true});
@@ -201,16 +203,73 @@ const updateConfig = () => {
     scheduleConfigSave();
 }
 // Debounced: settings often change in bursts.
-const scheduleConfigSave = () => {
+const scheduleConfigSave = (delay=5000) => {
     if(timer!==undefined) clearTimeout(timer);
     timer = setTimeout(() => {
+        timer = undefined;
         saveConfig().catch((err) => {
             log.error('Config','Could not save the config file: '+(err && err.message ? err.message : err));
         });
-    }, 5000);
+    }, delay);
 }
+// Environment overrides (lib/env.js) live in memory only. Each one remembers
+// what config.json had at that path, and that is what gets saved, so values
+// from the environment - the MQTT password above all - never reach the disk.
+const overrides = [];
+const getPath = (obj,keys) => {
+    let node = obj;
+    for (const key of keys) {
+        if(node===null || typeof node!=='object' || !Object.prototype.hasOwnProperty.call(node,key)) return {found:false};
+        node = node[key];
+    }
+    return {found:true, value:node};
+};
+const setPath = (obj,keys,value) => {
+    let node = obj;
+    for (const key of keys.slice(0,-1)) {
+        if(node[key]===null || typeof node[key]!=='object' || Array.isArray(node[key])) node[key] = {};
+        node = node[key];
+    }
+    node[keys[keys.length-1]] = value;
+};
+const applyOverrides = (list) => {
+    for (const item of list) {
+        const keys = item.path;
+        const known = overrides.find(o => o.path.join('.')===keys.join('.'));
+        if(known!==undefined) {
+            known.value = item.value;
+        } else {
+            overrides.push({
+                path: keys,
+                value: item.value,
+                file: getPath(config,keys),
+                parentInFile: getPath(config,keys.slice(0,-1)).found
+            });
+        }
+        setPath(config,keys,item.value);
+    }
+};
+// What config.json should hold: config with every override undone.
+const persistedConfig = () => {
+    const copy = JSON.parse(JSON.stringify(config));
+    for (const o of overrides) {
+        if(o.file.found===true) {
+            setPath(copy,o.path,o.file.value);
+            continue;
+        }
+        const parent = getPath(copy,o.path.slice(0,-1));
+        if(parent.found!==true || parent.value===null || typeof parent.value!=='object') continue;
+        delete parent.value[o.path[o.path.length-1]];
+        // A section created only for an override goes too.
+        if(o.parentInFile!==true && o.path.length>1 && Object.keys(parent.value).length===0) {
+            const grand = o.path.length>2 ? getPath(copy,o.path.slice(0,-2)).value : copy;
+            if(grand!==null && typeof grand==='object') delete grand[o.path[o.path.length-2]];
+        }
+    }
+    return copy;
+};
 const saveConfig = () => queueDisk(async () => {
-    const text = JSON.stringify(config,null,2);
+    const text = JSON.stringify(persistedConfig(),null,2);
     if(text.length<=2) return false;
     let saved = false;
     try {
@@ -222,7 +281,9 @@ const saveConfig = () => queueDisk(async () => {
     }
     return saved;
 });
-if(configNeedsSave===true) scheduleConfigSave();
+// First run (or a repaired file): write config.json right away. The timer
+// lets gateway.js apply its environment overrides first, which are left out.
+if(configNeedsSave===true) scheduleConfigSave(0);
 let core;
 // Core supervision. index.js tracks the core it forked: an unexpected exit is
 // reported and the core is forked again with backoff (2 s doubling to 60 s,
@@ -357,6 +418,8 @@ const stopCore = (child) => {
     if(child!==undefined && child!==core) stopCoreProcess(child);
     return stopCoreProcess(core);
 }
+// serial: initiateCore(null, serialPort, cb); nibegw: initiateCore(gatewayHost,
+// localUdpPort, cb). cb(null, core) once the pump model is known.
 const initiateCore = (host,port,cb) => {
     if(configLoadFault!==undefined) {
         // Delayed so the caller's 'fault' listeners are attached.
@@ -413,7 +476,7 @@ const forkCore = () => {
     if(mode==="serial") {
         start = startCore(port);
     } else if(mode==="nibegw") {
-        start = startNibeGW(port);
+        start = startNibeGW(host,port);
     } else {
         coreState = 'down';
         return;
@@ -1646,6 +1709,9 @@ module.exports = {
     stopCore:stopCore,
     data:nibeEmit,
     getConfig:getConfig,
+    getConfigFile:() => configFile,
+    applyOverrides:applyOverrides,
+    saveConfig:saveConfig,
     getRegister:getRegister,
     getHealth:getHealth,
     handleMQTT:handleMQTT
