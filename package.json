@@ -18,7 +18,8 @@
   "main": "index.js",
   "name": "nibepi",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test test/*.test.js"
   },
   "version": "2.0.0",
   "engines": {

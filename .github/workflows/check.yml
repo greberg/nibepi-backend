@@ -19,3 +19,5 @@ jobs:
           git ls-files '*.json' | while read -r f; do
             node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$f" || { echo "invalid JSON: $f"; exit 1; }
           done
+      - name: Unit tests
+        run: npm test
