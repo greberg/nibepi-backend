@@ -34,7 +34,9 @@ const { SerialPort } = require('serialport');
 const nack = [0x15];
 const ack = [0x06];
 var myPort;
-const sendQueue = [[192,107,6,115,176,1,0,0,0,111],[192,107,6,212,190,0,0,0,0,199]];
+// 48852=0: Modbus40 word order. No alarm reset (45171) at start: that
+// acknowledged every pending pump alarm. index.js resets only MODBUS alarm 251.
+const sendQueue = [[192,107,6,212,190,0,0,0,0,199]];
 const getQueue = [];
 const rmuQueue = [];
 var regQueue = [];
@@ -170,7 +172,6 @@ function analyzeData(data) {
         if(msgOut.length>=3) {
                 if(startReset===true) {
                     startReset = false;
-                    sendQueue.push([192,107,6,115,176,1,0,0,0,111]);
                 }
                 // Only decode objects we know
                 if(msgOut[2]!==0x19 && msgOut[2]!==0x1A && msgOut[2]!==0x1B && msgOut[2]!==0x1C&& msgOut[2]!==0x20) {

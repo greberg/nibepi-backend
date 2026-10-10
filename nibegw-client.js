@@ -3,7 +3,9 @@ var server = dgram.createSocket('udp4');
 
 var HOST = "127.0.0.1";
 var PORT = 9999;
-const sendQueue = [[192,107,6,115,176,1,0,0,0,111],[192,107,6,212,190,0,0,0,0,199]];
+// 48852=0: Modbus40 word order. No alarm reset (45171) at start: that
+// acknowledged every pending pump alarm. index.js resets only MODBUS alarm 251.
+const sendQueue = [[192,107,6,212,190,0,0,0,0,199]];
 const getQueue = [];
 var red = false;
 var regQueue = [];
