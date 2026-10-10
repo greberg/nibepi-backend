@@ -24,7 +24,6 @@ SOFTWARE.
 const nibepi_version = require('./package.json').version;
 const Core = require(__dirname+'/lib/startCore')
 const startCore = Core.startCoreF;
-const startCoreS = Core.startCoreS;
 const startNibeGW = Core.startNibeGW;
 const stopCoreProcess = require(__dirname+'/lib/stopCore');
 const Lease = require(__dirname+'/lib/lease');
@@ -415,138 +414,43 @@ const forkCore = () => {
             reportHandlerError(err);
         }
     };
-    let forked = false;
-
-if(config.connection!==undefined && config.connection.series!==undefined) {
-    if(config.connection.series=="fSeries") {
-        if(config.connection.enable=="serial") {
-            forked = true;
-            startCore(port).then(result => {
-                if(adopt(result)===false) return;
-                if(config.system!==undefined && config.system.rmu_emulation===false) {
-                    console.log('RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
-                    core.send({type:"rmuEmulation",data:false});
-                }
-                
-                core.on('message', fromCore((m) => {
-                    if(m.type=="data") {
-                        markData();
-                        let n = m.data;
-                        announcment(m, (err,ready) => {
-                            if(err) console.log(err);
-                            if(ready===true) {
-                                config.serial.port = port;
-                                cb(null,result);
-                            } else {
-        
-                            }
-                        });
-                        decodeRMU(n);
-                        decodeMessage(n);
-                    } else if(m.type=="fault") {
-                        nibeEmit.emit('fault',m.data);
-                    } else if(m.type=="ack") {
-                        nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
-                    } else if(m.type=="busStats") {
-                        onBusStats(m.data);
-                    } else if(m.type=="log") {
-                        if(config.log===undefined) {
-                            config.log = {};
-                            updateConfig();
-                        }
-                        log(config.log.enable,m.data,config.log[m.level],m.kind);
-                    }
-                  }));
-            });
-        } else if(config.connection.enable=="nibegw") {
-            forked = true;
-            startNibeGW(port).then(result => {
-                if(adopt(result)===false) return;
-                
-                core.on('message', fromCore((m) => {
-                    if(m.type=="data") {
-                        markData();
-                        let n = m.data;
-                        announcment(m, (err,ready) => {
-                            if(err) console.log(err);
-                            if(ready===true) {
-                                config.serial.port = port;
-                                cb(null,result);
-                            } else {
-        
-                            }
-                        });
-                        decodeMessage(n);
-                    } else if(m.type=="fault") {
-                        nibeEmit.emit('fault',m.data);
-                    } else if(m.type=="ack") {
-                        nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
-                    } else if(m.type=="log") {
-                        if(config.log===undefined) {
-                            config.log = {};
-                            updateConfig();
-                        }
-                        log(config.log.enable,m.data,config.log[m.level],m.kind);
-                    }
-                  }));
-            });
-        }
-        
-    } else if(config.connection.series=="sSeries") {
-                    forked = true;
-                    startCoreS(host,port).then(result => {
-                        if(adopt(result)===false) return;
-                        core.on('message', fromCore((m) => {
-                            if(m.type=="started") {
-                                if(coreState==='starting') coreState = 'up';
-                                let data = m.data;
-                                if(config.tcp!==undefined && config.tcp.pump!==undefined) {
-                                    let reg = require(`./models/${config.tcp.pump}.json`);
-                                    if(reg!==undefined) {
-                                        for (i = 0; i < reg.length; i = i + 1) {
-                                            let found = false;
-                                            for (j = 0; j < register.length; j = j + 1) {
-                                                if(register[j].register===reg[i].register) {
-                                                    found = true;
-                                                }
-                                            }
-                                            if(found===false) {
-                                                register.push(reg[i])
-                                            }
-                                        }
-                                        if(regQueue.length===0) {
-                                            for (var i = 0; i < config.registers.length; i++) {
-                                                addRegular(config.registers[i]);
-                                            }
-                                        }
-                                    }
-                                    
-                                }
-                                
-                                if(data===true) {
-                                    cb(null,result);
-                                }
-                                // Process message
-                            } else if(m.type=="data") {
-                                markData();
-                                let data = m.data;
-                                decodeS(data);
-                            } else if(m.type=="ack") {
-                                nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
-                            } else if(m.type=="fault") {
-                                nibeEmit.emit('fault',m.data);
-                            } else if(m.type=="log") {
-                                if(config.log===undefined) {
-                                    config.log = {};
-                                    updateConfig();
-                                }
-                                log(config.log.enable,m.data,config.log[m.level],m.kind);
-                            }
-                          }));
-                    });
+    const mode = config.connection.enable;
+    let start;
+    if(mode==="serial") {
+        start = startCore(port);
+    } else if(mode==="nibegw") {
+        start = startNibeGW(port);
+    } else {
+        coreState = 'down';
+        return;
     }
-}
-    if(forked===false) coreState = 'down';
+    start.then(result => {
+        if(adopt(result)===false) return;
+        if(mode==="serial" && config.system.rmu_emulation===false) {
+            console.log('RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
+            core.send({type:"rmuEmulation",data:false});
+        }
+        core.on('message', fromCore((m) => {
+            if(m.type=="data") {
+                markData();
+                let n = m.data;
+                announcment(m, (err,ready) => {
+                    if(err) console.log(err);
+                    if(ready===true) cb(null,result);
+                });
+                if(mode==="serial") decodeRMU(n);
+                decodeMessage(n);
+            } else if(m.type=="fault") {
+                nibeEmit.emit('fault',m.data);
+            } else if(m.type=="ack") {
+                nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
+            } else if(m.type=="busStats") {
+                onBusStats(m.data);
+            } else if(m.type=="log") {
+                log(config.log.enable,m.data,config.log[m.level],m.kind);
+            }
+        }));
+    });
 }
 
 
@@ -762,50 +666,11 @@ async function reqData (address) {
         });
         return promise;
     }
-    async function getDataSseries(address) {
-        const promise = new Promise((resolve,reject) => {
-            let index = register.findIndex(index => index.register == address);
-            if(index!==-1 || (address!==undefined && config.system.testmode===true && address!=="00000")) {
-                let settled = false;
-                let failTimer;
-                const finish = (err,data) => {
-                    if(settled===true) return;
-                    settled = true;
-                    clearTimeout(failTimer);
-                    nibeEmit.removeListener(address,listener);
-                    if(err!==null) { reject(err); } else { resolve(data); }
-                };
-                const listener = (data) => { finish(null,data); };
-                nibeEmit.on(address,listener);
-                failTimer = setTimeout(() => {
-                    noRespondCount++;
-                    finish(new Error('No respond from register ('+address+')'));
-                }, 30000);
-                core.send({type:"reqData",data:address});
-            } else {
-                reject(new Error('Register ('+address+') not in database'));
-            }
-
-        });
-        return promise;
-    }
     const promise = new Promise((resolve,reject) => {
         if(core!==undefined && core.connected!==undefined && core.connected===true) {
-            if(config.connection===undefined || config.connection.series===undefined) return reject(new Error('Configuration is invalid'));
-            if(config.connection.series=="fSeries") {
-                whenModelKnown()
-                    .then(() => getDataFseries(address))
-                    .then(resolve, reject);
-            } else if(config.connection.series=="sSeries") {
-                getDataSseries(address).then(result => {
-                    resolve(result)
-                }).catch((error => {
-                    reject(error)
-                })).catch(err => {
-                    reject(err)
-                });
-            }
-            
+            whenModelKnown()
+                .then(() => getDataFseries(address))
+                .then(resolve, reject);
         } else {
             reject(new Error('Core is not started.'))
         }
@@ -815,8 +680,7 @@ async function reqData (address) {
 }
 
 
-// Waits up to SET_WAIT_MS for a running core (and, on F-series, a known
-// model), then sends. cb is always called exactly once: cb(null,ack) when the
+// Waits up to SET_WAIT_MS for a running core and a known model, then sends. cb is always called exactly once: cb(null,ack) when the
 // core reports the write, cb(err) on rejection, timeout or no ACK. The two
 // string errors are kept as they were for existing callers.
 const SET_WAIT_MS = 30000;
@@ -860,7 +724,7 @@ const setData = (address,value,cb=()=>{},opts) => {
         cb(null,result);
     };
     const coreUp = () => (core!==undefined && core.connected===true);
-    const ready = () => coreUp() && (config.connection===undefined || config.connection.series!=="fSeries" || model.length!==0);
+    const ready = () => coreUp() && model.length!==0;
     const send = () => {
         // The lease may have started while this write waited for the core.
         const refused = leaseRefusal();
@@ -896,19 +760,14 @@ const setData = (address,value,cb=()=>{},opts) => {
 function getData(address) {
     var item = register.find(item => item.register == address);
     if(item!==undefined || config.system.testmode===true) {
-        if(config.connection.enable!==undefined && (config.connection.enable=="serial" || config.connection.enable=="nibegw")) {
-            var data = [];
-            data[0] = 0xc0;
-            data[1] = 0x69;
-            data[2] = 0x02;
-            data[3] = (address & 0xFF);
-            data[4] = ((address >> 8) & 0xFF);
-            data[5] = Calc_CRC(data);
-            return(data);
-        } else if(config.connection.enable!==undefined && config.connection.enable=="tcp") {
-            return(address);
-        }
-            
+        var data = [];
+        data[0] = 0xc0;
+        data[1] = 0x69;
+        data[2] = 0x02;
+        data[3] = (address & 0xFF);
+        data[4] = ((address >> 8) & 0xFF);
+        data[5] = Calc_CRC(data);
+        return(data);
     } else {
         // Logged once per register: request nodes for other models ask for
         // these on every poll.
@@ -975,7 +834,6 @@ function setDataValue(incoming) {
     var data = [];
     var rmu = {data:[],address:incoming.register,ackback:[]};
         if(item.mode=="R/W") {
-            var corruptData;
             let check = checkWriteValue(item,incoming.value);
             if(check.code===-4) {
                 nibeEmit.emit('fault',{from:"Skicka värde",message:'Ogiltigt värde ('+incoming.value+') till register '+incoming.register+', skickas inte.'});
@@ -988,65 +846,51 @@ function setDataValue(incoming) {
                 return -3;
             }
             incoming.value = check.raw;
-            if(config.connection.enable!==undefined && (config.connection.enable=="serial" || config.connection.enable=="nibegw")) {
-                if(item.register.charAt(0)=="1") {
-                    let len = 0x03;
-                    if(item.size=="s8" || item.size=="u8") {
-                        len = 0x02;
-                    }
-                    rmu.data[0] = 0xc0;
-                    rmu.data[1] = 0x60;
-                    rmu.data[2] = len;
-                    rmu.data[3] = Number(item.register.charAt(3));
-                    if(item.size=="s8" || item.size=="u8") {
-                        rmu.data[4] = (incoming.value & 0xFF);
-                        rmu.data[5] = Calc_CRC(rmu.data);
-                    } else {
-                        let value = incoming.value;
-                        if(value>=32768) { value = value-7 } else { value = value+7 }
-                        rmu.data[4] = (value & 0xFF);
-                        rmu.data[5] = ((value >> 8) & 0xFF);
-                        rmu.data[6] = Calc_CRC(rmu.data);
-                    } 
-                    rmu.ackback[0] = 92;
-                    rmu.ackback[1] = 0;
-                    rmu.ackback[2] = (Number(item.register.charAt(2))+25);
-                    rmu.ackback[3] = 96;
-                    rmu.ackback[4] = 6;
-                    rmu.ackback[5] = (incoming.register & 0xFF);
-                    rmu.ackback[6] = ((incoming.register >> 8) & 0xFF);
-                    rmu.ackback[7] = (incoming.value & 0xFF);
-                    rmu.ackback[8] = ((incoming.value >> 8) & 0xFF);
-                    rmu.ackback[9] = ((incoming.value >> 16) & 0xFF);
-                    rmu.ackback[10] = ((incoming.value >> 24) & 0xFF);
-                    rmu.ackback[11] = Calc_CRC(rmu.ackback);
+            if(item.register.charAt(0)=="1") {
+                let len = 0x03;
+                if(item.size=="s8" || item.size=="u8") {
+                    len = 0x02;
+                }
+                rmu.data[0] = 0xc0;
+                rmu.data[1] = 0x60;
+                rmu.data[2] = len;
+                rmu.data[3] = Number(item.register.charAt(3));
+                if(item.size=="s8" || item.size=="u8") {
+                    rmu.data[4] = (incoming.value & 0xFF);
+                    rmu.data[5] = Calc_CRC(rmu.data);
                 } else {
-                    data[0] = 0xc0;
-                    data[1] = 0x6b;
-                    data[2] = 0x06;
-                    data[3] = (incoming.register & 0xFF);
-                    data[4] = ((incoming.register >> 8) & 0xFF);
-                    data[5] = (incoming.value & 0xFF);
-                    data[6] = ((incoming.value >> 8) & 0xFF);
-                    data[7] = ((incoming.value >> 16) & 0xFF);
-                    data[8] = ((incoming.value >> 24) & 0xFF);
-                    data[9] = Calc_CRC(data);
-                }
-                if(corruptData===undefined) {
-                    log(config.log.enable,`Sending data: ${incoming.register}, ${incoming.value}, ${JSON.stringify(data)}`,config.log['info'],"Data");
-                    if(data.length===0) {
-                        return rmu;
-                    } else {
-                        return data;
-                    }
-                }
-            } else if(config.connection.enable!==undefined && config.connection.enable=="tcp") {
-                if(corruptData===undefined) {
-                    item.data = incoming.value;
-                    log(config.log.enable,`Sending data: ${incoming.register}, ${incoming.value}`,config.log['info'],"Data");
-                    return item;
-                }
+                    let value = incoming.value;
+                    if(value>=32768) { value = value-7 } else { value = value+7 }
+                    rmu.data[4] = (value & 0xFF);
+                    rmu.data[5] = ((value >> 8) & 0xFF);
+                    rmu.data[6] = Calc_CRC(rmu.data);
+                } 
+                rmu.ackback[0] = 92;
+                rmu.ackback[1] = 0;
+                rmu.ackback[2] = (Number(item.register.charAt(2))+25);
+                rmu.ackback[3] = 96;
+                rmu.ackback[4] = 6;
+                rmu.ackback[5] = (incoming.register & 0xFF);
+                rmu.ackback[6] = ((incoming.register >> 8) & 0xFF);
+                rmu.ackback[7] = (incoming.value & 0xFF);
+                rmu.ackback[8] = ((incoming.value >> 8) & 0xFF);
+                rmu.ackback[9] = ((incoming.value >> 16) & 0xFF);
+                rmu.ackback[10] = ((incoming.value >> 24) & 0xFF);
+                rmu.ackback[11] = Calc_CRC(rmu.ackback);
+            } else {
+                data[0] = 0xc0;
+                data[1] = 0x6b;
+                data[2] = 0x06;
+                data[3] = (incoming.register & 0xFF);
+                data[4] = ((incoming.register >> 8) & 0xFF);
+                data[5] = (incoming.value & 0xFF);
+                data[6] = ((incoming.value >> 8) & 0xFF);
+                data[7] = ((incoming.value >> 16) & 0xFF);
+                data[8] = ((incoming.value >> 24) & 0xFF);
+                data[9] = Calc_CRC(data);
             }
+            log(config.log.enable,`Sending data: ${incoming.register}, ${incoming.value}, ${JSON.stringify(data)}`,config.log['info'],"Data");
+            return data.length===0 ? rmu : data;
         } else {
             nibeEmit.emit('fault',{from:"Skicka värde",message:'Register('+incoming.register+') går ej att skriva till.'});
             log(config.log.enable,'Register('+incoming.register+') not allowed write access',config.log['error'],"Data");
@@ -1248,77 +1092,6 @@ const removeRegular = (address) => {
 }
 }
 
-async function decodeS(data) {
-    if(register.length===0) return;
-    let address = data.register;
-    data = data.data;
-    let timeNow = Date.now();
-    var index = register.findIndex(index => index.register == address);
-    if (index!==-1) {
-        if (register[index].size == "s32") {
-            if (data >= 2147483648) {
-                data = (data - 4294967296);
-            }
-        }
-        else if (register[index].size == "s16") {
-            if (data >= 32768) {
-                data = data - 65536;
-            }          
-        }
-        else if (register[index].size == "s8") {
-            if (data >= 128 && data < 32768) {
-                data = data - 256;
-            } else if (data >= 32768) {
-                data = data - 65536;
-            }
-        }
-        else if (register[index].size == "u32") {
-            data = data>>>0;
-        }
-        data = data / register[index].factor;
-        let corruptData = false;
-        let min = Number(register[index].min);
-        let max = Number(register[index].max);
-        if (min !== undefined && max !== undefined) {
-            if (min !== 0 || max !== 0) {
-                if ((data > max / register[index].factor) || (data < min / register[index].factor)) {
-                    nibeEmit.emit('fault',{from:"Datahantering",message:'Korrupt värde från register '+address+", Värde: "+data+register[index].unit});
-                    log(config.log.enable,register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit,config.log['error'],"CORRUPT");
-                    corruptData = true;
-                }
-            }
-        }
-        if(corruptData===false) {
-            register[index].data = data;
-            register[index].raw_data = data;
-            register[index].timestamp = timeNow;
-            nibeEmit.emit(address,register[index]);
-            addMQTTdiscovery(register[index]);
-            publishMQTT(config.mqtt.topic+address+"/json",JSON.stringify(register[index]))
-            publishMQTT(config.mqtt.topic+address+"/raw",register[index].raw_data)
-            publishMQTT(config.mqtt.topic+address,register[index].data)
-            log(config.log.enable,JSON.stringify(register[index]),config.log['debug'],"Data");
-            log(config.log.enable,register[index].register+", "+register[index].titel+": "+register[index].data+" "+register[index].unit,config.log['debug'],"Data");
-        }
-    } else if((config.system.testmode===true && address!=="00000")) {
-        let output = {
-            register:address,
-            data:data,
-            raw_data:data,
-            factor:1,
-            unit:"",
-            size:"",
-            titel:"Unknown register "+address,
-            info:"",
-            mode:"R",
-            min:0,
-            max:0,
-            timestamp:timeNow
-        }
-        log(config.log.enable,JSON.stringify(output),config.log['debug'],"Data");
-        nibeEmit.emit(address,output);
-    }
-}
 const decodeMessage = (buf) => {
     
     
@@ -1820,7 +1593,7 @@ leases = new Lease.LeaseManager({
     write: (reg,value) => new Promise((resolve,reject) => {
         setData(reg,value,(err,ack) => {
             if(err) return reject(err instanceof Error ? err : new Error(String(err)));
-            // S-series cores answer a refused write with ack false.
+            // A core may answer a refused write with ack false.
             if(ack===false) return reject(new Error('Write to register '+reg+' was not acknowledged'));
             resolve(ack);
         },{lease:true});

@@ -30,26 +30,16 @@ nibe.data.on('fault', (data) => {
 // the first start only: the backend supervises and restarts the core itself.
 function startCore() {
     const config = nibe.getConfig();
-    const connection = ensure(config, 'connection');
-    const serial = ensure(config, 'serial');
-    const tcp = ensure(config, 'tcp');
-    console.log(`Heatpump series: ${connection.series}`);
+    const connection = config.connection;
+    const serial = config.serial;
+    console.log(`Connection: ${connection.enable}`);
     const onReady = (err) => {
         if(err) console.log(err);
-        const conf = nibe.getConfig();
-        const name = connection.series==="sSeries" ? conf.tcp.pump : (conf.system!==undefined ? conf.system.pump : '');
-        console.log(`Nibe ${name} is connected`);
+        console.log(`Nibe ${nibe.getConfig().system.pump} is connected`);
     };
-    if(connection.series==="fSeries") {
-        if(serial.port!==undefined && serial.port!=="" && (connection.enable==="serial" || connection.enable==="nibegw")) {
-            nibe.initiateCore(null, serial.port, onReady);
-            return true;
-        }
-    } else if(connection.series==="sSeries") {
-        if(tcp.host!==undefined && tcp.host!=="" && tcp.port!==undefined && tcp.port!=="" && connection.enable==="tcp") {
-            nibe.initiateCore(tcp.host, tcp.port, onReady);
-            return true;
-        }
+    if(serial.port!==undefined && serial.port!=="" && (connection.enable==="serial" || connection.enable==="nibegw")) {
+        nibe.initiateCore(null, serial.port, onReady);
+        return true;
     }
     return false;
 }
@@ -119,7 +109,7 @@ process.on('uncaughtException', (err) => {
 });
 
 if(startCore()!==true) {
-    console.log('No usable connection in config.json: set connection.series and connection.enable, and serial.port or tcp.host/tcp.port');
+    console.log('No usable connection in config.json: set connection.enable to serial or nibegw, and serial.port');
     process.exit(1);
 }
 startMQTT();
