@@ -1646,7 +1646,20 @@ leases = new Lease.LeaseManager({
         },{lease:true});
     }),
     read: (reg) => reqData(reg).then(data => Number(data.raw_data)),
-    validate: validateWrite,
+    // RMU40 registers (1xxxx) only exist once the pump polls that room unit,
+    // and are read-only when another RMU40 answers: say so instead of
+    // "Register dont exist" or "Register not writeable".
+    validate: (reg,value) => {
+        if(register.length!==0) {
+            const refusal = Lease.rmuRefusal(reg,register.find(item => item.register == reg));
+            if(refusal!==null) return refusal;
+        }
+        return validateWrite(reg,value);
+    },
+    normalize: (reg,value) => {
+        const item = register.find(item => item.register == reg);
+        return item!==undefined ? Lease.roundToFactor(value,item.factor) : value;
+    },
     persist: (baselines) => {
         gatewayConfig().baselines = baselines;
         return saveConfig().then(saved => {
