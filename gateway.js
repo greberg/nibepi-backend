@@ -8,7 +8,7 @@
 //   node gateway.js        (npm run gateway)
 //
 // Settings come from /etc/nibepi/config.json as for the Node-RED setup.
-// Logs go to stdout; set NIBEPI_DOCKER=1 in a container.
+// Logs go to stdout.
 const fs = require('fs');
 const nibe = require('./index.js');
 

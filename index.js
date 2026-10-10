@@ -29,10 +29,6 @@ const startNibeGW = Core.startNibeGW;
 const stopCoreProcess = require(__dirname+'/lib/stopCore');
 const Lease = require(__dirname+'/lib/lease');
 var log = require('./log');
-var child = require('child_process');
-var docker = false;
-let exec = child.exec;
-let spawn = child.spawn;
 let model = "";
 let rmu = {};
 let firmware = "";
@@ -47,22 +43,13 @@ const nibeEmit = new EventEmitter();
 const fs = require('fs');
 const path = "/etc/nibepi"
 const configFile = path+'/config.json';
+// The gateway always runs with a writable config directory.
 if (!fs.existsSync(path)) {
-    // Plain mkdir works in the container and wherever the user may create it;
-    // the sudo route is for a bare Pi with a read-only root filesystem.
     try {
         fs.mkdirSync(path, {recursive:true});
         console.log(`Configuration directory created ${path}`);
     } catch(e) {
-        exec(`sudo mount -o remount,rw / && sudo mkdir ${path} && sudo chown ${process.env.USER}:${process.env.USER} ${path}`, function(error, stdout, stderr) {
-            if(error) {
-                exec(`mkdir ${path} && chown ${process.env.USER}:${process.env.USER} ${path}`, function(error, stdout, stderr) {
-                    if(error) {console.log('Error creating config directory')} else { console.log('Created config directory')}
-                });
-            } else {
-                console.log(`Configuration directory created ${path}`);
-            }
-        });
+        console.error(`[nibepi] Could not create the configuration directory ${path}: ${e.message}`);
     }
 }
 const readJSON = (file) => JSON.parse(fs.readFileSync(file,'utf8'));
@@ -104,24 +91,20 @@ function loadConfig() {
             kept = ` Den skadade filen är sparad som ${corrupt}.`;
             console.error(`[nibepi] The unreadable config file was moved to ${corrupt}`);
         } catch(e) {
-            // Read-only root: writeFileAtomic moves it aside when it saves.
+            // writeFileAtomic moves it aside when it saves.
             console.error(`[nibepi] Could not move the unreadable config file aside: ${e.message}`);
         }
     }
     configLoadFault = 'Inställningsfilen var skadad och kunde inte återställas, standardinställningar används.'+kept;
     return readJSON(__dirname+'/default.json');
 }
-// All disk writes go through one chain, so the remount rw/ro of one save
-// cannot interleave with another write.
+// All disk writes go through one chain, so two saves cannot interleave.
 let diskQueue = Promise.resolve();
 const queueDisk = (job) => {
     const run = diskQueue.then(job);
     diskQueue = run.catch(() => {});
     return run;
 }
-const execPromise = (cmd) => new Promise((resolve,reject) => {
-    exec(cmd, (error) => { if(error) { reject(error); } else { resolve(); } });
-});
 const writeSynced = async (file,text) => {
     const handle = await fs.promises.open(file,'w');
     try {
@@ -212,16 +195,6 @@ log(logEnabled(),`NibePi ${nibepi_version} starting`,true,"System");
 process.on('exit', (code) => {
     log(logEnabled(),`NibePi stopping (exit code ${code})`,true,"System");
 });
-// Deployment target: container vs bare Raspberry Pi. Decides whether config
-// writes go straight to disk, or bracket themselves with sudo mount remount,rw
-// to get at a read-only SD card. Precedence: NIBEPI_DOCKER, then
-// config.system.docker, else false (bare Pi).
-if(process.env.NIBEPI_DOCKER!==undefined) {
-    let v = String(process.env.NIBEPI_DOCKER).trim().toLowerCase();
-    docker = (v==='1' || v==='true' || v==='yes' || v==='on');
-} else if(config!==undefined && config.system!==undefined && config.system.docker!==undefined) {
-    docker = (config.system.docker===true || String(config.system.docker).toLowerCase()==='true');
-}
 var timer;
 // Called after config has been changed in place: the lease baselines are
 // taken from the live leases, so a save can never drop one that a restart
@@ -244,14 +217,6 @@ const saveConfig = () => queueDisk(async () => {
     if(config.log===undefined) config.log = {};
     const text = JSON.stringify(config,null,2);
     if(text.length<=2) return false;
-    if(docker===false) {
-        try {
-            await execPromise('sudo mount -o remount,rw /');
-        } catch(error) {
-            log(config.log.enable,"Could not open the system for write mode",config.log['error'],"Config");
-            return false;
-        }
-    }
     let saved = false;
     try {
         await writeFileAtomic(configFile,text);
@@ -259,15 +224,6 @@ const saveConfig = () => queueDisk(async () => {
         log(config.log.enable,"Config file saved",config.log['info'],"Config");
     } catch(err) {
         log(config.log.enable,err,config.log['error'],"Config");
-    }
-    if(docker===false && config.system.readonly===true) {
-        try {
-            await execPromise('sudo mount -o remount,ro /');
-            console.log('Read only mode set.')
-        } catch(error) {
-            nibeEmit.emit('fault',{from:"Inställningar",message:'Kunde inte sätta läsbart läge på filsystemet.'});
-            log(config.log.enable,"Could not set read-only mode.",config.log['error'],"Config");
-        }
     }
     return saved;
 });
@@ -411,28 +367,6 @@ const stopCore = (child) => {
 }
 const initiateCore = (host,port,cb) => {
     if(config.log===undefined) config.log = {};
-    if(docker===false) {
-        if(config.system.readonly===true) {
-            exec('sudo mount -o remount,ro /', function(error, stdout, stderr) {
-                if(error) {
-                    log(config.log.enable,"Could not set read-only mode at startup.",config.log['error'],"Startup");
-                    return(false);
-                } else {
-                    console.log('Read only mode set.')
-                    return (true)
-                }
-            })
-        } else {
-            exec('sudo mount -o remount,rw /', function(error, stdout, stderr) {
-                if(error) {
-                    log(config.log.enable,"Could not set write mode at startup.",config.log['error'],"Startup");
-                    return(false);
-                } else {
-                    return (true)
-                }
-            })
-        }
-    }
     if(configLoadFault!==undefined) {
         // Delayed so the caller's 'fault' listeners are attached.
         const text = configLoadFault;
@@ -1855,9 +1789,6 @@ const publishMQTTpromise = (topic,message,retain=false) => {
 });
 return promise;
 }
-const setDocker = (cmd) => {
-    docker = cmd;
-}
 const gatewayConfig = () => {
     if(config.gateway===null || typeof config.gateway!=='object' || Array.isArray(config.gateway)) config.gateway = {};
     return config.gateway;
@@ -1960,6 +1891,5 @@ module.exports = {
     getConfig:getConfig,
     getRegister:getRegister,
     getHealth:getHealth,
-    handleMQTT:handleMQTT,
-    setDocker:setDocker
+    handleMQTT:handleMQTT
 }
