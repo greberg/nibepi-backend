@@ -104,6 +104,32 @@ const logCatch = (err) => {
     logCatchSeen.set(msg, { at: now, skipped: 0 });
     console.warn(`[nibepi] ${msg}${skipped}`);
 };
+// F-series reads made before the pump has announced its model used to fail
+// at once with 'Heatpump is not ready yet.', so every caller started at
+// 'ready' got undefined and had to retry on the next event. They now wait
+// here for the model, up to MODEL_WAIT_MS, and only then fail with the same
+// message (callers and logCatch still recognise it).
+const MODEL_WAIT_MS = 30000;
+const modelWaiters = [];
+const whenModelKnown = () => new Promise((resolve, reject) => {
+    if (model.length !== 0) return resolve();
+    const waiter = { resolve };
+    waiter.timer = setTimeout(() => {
+        const i = modelWaiters.indexOf(waiter);
+        if (i !== -1) modelWaiters.splice(i, 1);
+        logCatch(new Error('Still waiting for the heat pump to announce its model'));
+        reject(new Error('Heatpump is not ready yet.'));
+    }, MODEL_WAIT_MS);
+    modelWaiters.push(waiter);
+});
+// Call once model and register table are both loaded.
+const modelKnown = () => {
+    while (modelWaiters.length !== 0) {
+        const waiter = modelWaiters.shift();
+        clearTimeout(waiter.timer);
+        waiter.resolve();
+    }
+};
 log(logEnabled(),`NibePi ${nibepi_version} starting`,true,"System");
 process.on('exit', (code) => {
     log(logEnabled(),`NibePi stopping (exit code ${code})`,true,"System");
@@ -459,6 +485,7 @@ const announcment = (msg,cb) => {
                     register.push(reg[i])
                 }
             }
+            modelKnown();
             cb(null,true)
             console.log(`Nibe ${model} connected`);
             console.log(`Firmware ${firmware}`);
@@ -496,6 +523,7 @@ const announcment = (msg,cb) => {
                         register.push(reg[i])
                     }
                 }
+                modelKnown();
                 cb(null,true)
                 console.log(`${model} connected`);
                 console.log(`Firmware ${firmware}`);
@@ -643,15 +671,9 @@ async function reqData (address) {
         if(core!==undefined && core.connected!==undefined && core.connected===true) {
             if(config.connection===undefined || config.connection.series===undefined) return reject(new Error('Configuration is invalid'));
             if(config.connection.series=="fSeries") {
-                if(model.length!==0) {
-                    getDataFseries(address).then(result => {
-                        resolve(result)
-                    }).catch((err => {
-                        reject(err)
-                    }));
-                } else {
-                    reject(new Error('Heatpump is not ready yet.'))
-                }
+                whenModelKnown()
+                    .then(() => getDataFseries(address))
+                    .then(resolve, reject);
             } else if(config.connection.series=="sSeries") {
                 getDataSseries(address).then(result => {
                     resolve(result)
