@@ -1588,8 +1588,10 @@ const updateSensors = (config) => {
     if(mqtt_client!==undefined && mqtt_client.connected===true) {
         for (const arr of mqtt_subcribers) {
             mqtt_client.subscribe(arr);
-            nibeEmit.emit('updateSensor',true);
         }
+        // Once for the whole list, not once per sensor: every updateSensor
+        // restarts all plugins through 'ready' in node-red-contrib-nibepi.
+        if(mqtt_subcribers.length!==0) nibeEmit.emit('updateSensor',true);
     }
 }
 const addSensor = (data) => {
