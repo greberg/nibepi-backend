@@ -1,138 +1,264 @@
-# nibepi-backend
+# nibepi-backend: NibePi gateway
 
-The core of NibePi: everything between a Nibe heat pump and Node-RED. It speaks
-the wire protocol, decodes and encodes registers, keeps a register database per
-pump model, persists configuration, and optionally publishes to MQTT.
+An RS485/MQTT gateway for Nibe heat pumps. It sits on the pump's RS485 bus
+(directly or through a NibeGW), decodes and encodes registers, polls the ones
+you ask for and publishes them over MQTT, and writes values back after
+validating them. It runs as a single process, `node gateway.js`, usually in
+Docker on a Raspberry Pi. The reference install is a Nibe F1255.
 
-This is a library, not an application. It is installed as a dependency of
-[node-red-contrib-nibepi](https://github.com/fnordpojk/node-red-contrib-nibepi),
-which wraps it as Node-RED nodes.
+The gateway contains no control logic. Price, indoor, weather and hot water
+control live in the Home Assistant component
+[nibepi-ha](https://github.com/greberg/nibepi-ha), which talks to the gateway
+over MQTT only. Registers that Home Assistant controls are held through
+**leases**. When Home Assistant stops renewing a lease, the gateway restores
+the register by itself.
 
-Originally written by Fredrik Anerdin as
-[anerdins/nibepi](https://github.com/anerdins/nibepi). Upstream development
-stopped after 1.2.1; this fork continues from there. The npm package is still
-named `nibepi`.
+The gateway does the following:
 
-## The four repositories
+- speaks the Nibe RS485 protocol and answers the pump as an RMU40 room unit
+  when no real one is fitted (`system.rmu_emulation`)
+- decodes registers from the per-model tables in `models/`
+- validates every write against the register's type and the model's
+  min/max, then queues it in order, one entry per register
+- supervises the core process and restarts it with backoff
+- runs a bus watchdog that restarts a core that gets no frames for 5 minutes
+- publishes bus health once a minute
+- publishes a health file for the Docker `HEALTHCHECK`
+- can publish Home Assistant MQTT discovery for the polled registers
+- applies leases and a raw `/set` policy
 
-| repo | what it is |
-|---|---|
-| **nibepi-backend** | this one: transport, protocol, register database, MQTT |
-| [node-red-contrib-nibepi](https://github.com/fnordpojk/node-red-contrib-nibepi) | the Node-RED nodes |
-| [nibepi-flow](https://github.com/fnordpojk/nibepi-flow) | the flows and dashboard built on those nodes |
-| [nibepi-docker](https://github.com/fnordpojk/nibepi-docker) | container packaging for all of it |
+## Running
 
-## How it reaches the pump
+```sh
+npm ci
+npm start                 # node gateway.js
+```
 
-Three transports, chosen with `connection.enable` in the config:
+Docker image: `ghcr.io/greberg/nibepi-gateway`. Mount a writable volume for
+the config directory, pass the serial device through, and configure the rest
+with environment variables:
 
-| mode | how | ports |
-|---|---|---|
-| `serial` | RS485 adapter on a serial port | — |
-| `nibegw` | UDP frames from a NibeGW gateway | listens on 9999/udp; sends reads to 10000, writes to 10001 |
-| `tcp` | Modbus TCP, for S-series (`connection.series: "sSeries"`) | as configured |
+```sh
+docker run -d --name nibepi --restart unless-stopped \
+  --device /dev/serial0:/dev/ttyAMA0 \
+  -v /opt/nibepi/etc/nibepi:/etc/nibepi \
+  -e NIBEPI_MQTT_HOST=192.168.1.10 -e NIBEPI_MQTT_USER=nibepi -e NIBEPI_MQTT_PASS=... \
+  ghcr.io/greberg/nibepi-gateway
+```
 
-The `nibegw` mode works with the original
-[NibeGW](https://github.com/openhab/openhab-addons/tree/main/bundles/org.openhab.binding.nibeheatpump)
-hardware gateway and with
-[elupus/esphome-nibe](https://github.com/elupus/esphome-nibe) on an ESP32. With
-esphome-nibe, `read_port` and `write_port` must be `10000` and `10001`, and the
-host running NibePi must appear in its `source:` list, or its requests are
-dropped without a reply.
+Logs go to stdout/stderr (`docker logs nibepi`). On `SIGTERM` the gateway
+does the following before it exits:
 
-## Supported pumps
+- writes any pending config save
+- publishes `offline`
+- stops the core
 
-Register maps ship for:
+Active leases are not released on stop. Their baselines are persisted, and
+the next start gives the owner one TTL to renew them (see *Leases*).
 
-- **F-series** — F370, F470, F730, F750, F1145, F1155, F1245, F1255, F1345, F1355
-- **VVM** — VVM225, VVM310, VVM320, VVM325, VVM500, VVM S320
-- **SMO** — SMO40
-- **S-series** — S1255
-- **Rebadged and OEM units** — HMA60, SHK200S, STAR12, Tehowatti Air, VPK8R
-- **RMU40** room units as an accessory (S1–S4)
-
-These are exports of Nibe's own register lists: they describe what a model
-*can* expose, not what your unit answers. That depends on firmware and on which
-accessories are fitted, and a register the pump does not have simply never
-replies.
-
-## Requirements
+Requirements:
 
 - Node.js 20 or newer
-- An RS485 adapter, a NibeGW gateway, or Modbus TCP, depending on the transport
-- On a Raspberry Pi: a 64-bit-capable board, so Zero 2 W or newer. Node.js no
-  longer publishes 32-bit ARM builds.
+- an RS485 adapter or a NibeGW
+- on a Raspberry Pi, a 64-bit-capable board (Zero 2 W or newer)
 
 ## Configuration
 
-State lives in `/etc/nibepi`:
+Configuration comes from `config.json` in the config directory, with
+environment variables on top.
 
-| file | holds |
+On the first start, when there is no `config.json`, the gateway creates one
+from `default.json`. Every save is atomic: the new file is written and
+fsynced, and the previous file is kept as `config.json.bak`. An unreadable
+`config.json` is replaced by the `.bak` copy. If that is unreadable too, the
+gateway uses the defaults and keeps the broken file as
+`config.json.corrupt-<timestamp>`.
+
+### Environment
+
+Environment values override `config.json` **in memory only**. They are never
+written back, so a password passed as `NIBEPI_MQTT_PASS` does not end up on
+disk. An empty variable counts as unset. An invalid value stops the gateway
+with an error.
+
+| variable | config key | default |
+|---|---|---|
+| `NIBEPI_CONFIG_DIR` | directory holding `config.json` | `/etc/nibepi` |
+| `NIBEPI_CONNECTION` | `connection.enable`: `serial` or `nibegw` | `serial` |
+| `NIBEPI_SERIAL_PORT` | `serial.port` | `/dev/ttyAMA0` |
+| `NIBEPI_NIBEGW_HOST` | `nibegw.host`: the NibeGW / esphome-nibe device | |
+| `NIBEPI_NIBEGW_PORT` | `nibegw.port`: local UDP port the NibeGW sends to | `9999` |
+| `NIBEPI_MQTT_HOST` | `mqtt.host`; setting it turns MQTT on | (MQTT off) |
+| `NIBEPI_MQTT_PORT` | `mqtt.port` | `1883` |
+| `NIBEPI_MQTT_USER` | `mqtt.user` | |
+| `NIBEPI_MQTT_PASS` | `mqtt.pass` | |
+| `NIBEPI_MQTT_TOPIC` | `mqtt.topic`; a trailing `/` is added if missing | `nibe/modbus/` |
+| `NIBEPI_RAW_SET` | `gateway.raw_set`: `all`, `none` or `47011,47041,...` | `all` |
+| `NIBEPI_LOG_LEVEL` | `error`, `warn`, `info`, `debug`, `trace` (raw bus frames) | `info` |
+| `NIBEPI_LOG_FILE` | also append the log to this file, rotated at 5 MB | (off) |
+| `NIBEPI_HEALTH_FILE` | health file path | `/dev/shm/nibepi-health.json` |
+
+### config.json
+
+| key | meaning |
 |---|---|
-| `config.json` | connection, MQTT, logging, the polled register list, per-feature settings |
-| `graph.json` | saved graph history |
-| `vv_ai_profile.json` | the VV-AI hot water profile |
+| `connection.enable` | `serial` (RS485 adapter) or `nibegw` (UDP from a NibeGW) |
+| `serial.port` | serial device, e.g. `/dev/ttyAMA0` |
+| `nibegw.host`, `nibegw.port` | NibeGW host, and the local UDP port it sends to. Older configs that put the host in `serial.port` still work. |
+| `mqtt.host`, `port`, `user`, `pass`, `topic` | broker and topic prefix. MQTT is on when `host` is set, unless `mqtt.enable` is `false`. |
+| `mqtt.discovery` | `true` publishes Home Assistant MQTT discovery for the polled registers |
+| `registers` | registers polled continuously, managed through `T<reg>/add` and `/remove` |
+| `home.adjust_s1`, `home.adjust_s2` | neutral curve offset for system 1/2, the restore target of the 47011/47010 leases |
+| `system.rmu_emulation` | `false` never answers the pump as RMU40; use it when a physical RMU40 is on the bus |
+| `system.pump`, `system.firmware`, `system.id` | written by the gateway: the cached model, firmware and discovery id |
+| `gateway.raw_set` | what a plain `T<reg>/set` may write, see below |
+| `gateway.leases` | overrides of the lease table, see below |
+| `gateway.baselines` | written by the gateway: baselines of active leases, kept across restarts |
 
-`default.json` in this repo is the template used when no config exists yet.
+Keys the gateway doesn't know are ignored and kept as they are. This includes
+the Node-RED-era settings, such as `price`, `hotwater`, `indoor`, `weather`
+and `log`.
 
-**`NIBEPI_DOCKER`** — set it to `1` when running in a container. Without it the
-core assumes a bare Raspberry Pi with a read-only root filesystem and brackets
-every config write in `sudo mount -o remount,rw /`. In a container that fails
-and the write is lost silently. It can also be set as `system.docker` in the
-config; the environment variable wins.
+## MQTT
 
-## Gateway mode: leases over MQTT
-
-For control logic running elsewhere (a Home Assistant component), registers
-are written through *leases* that fall back by themselves. `T` is
-`mqtt.topic`, by default `nibe/modbus/`.
+`T` is the topic prefix (`mqtt.topic`, default `nibe/modbus/`). The full
+contract, including the rationale for leases, is in
+`docs/ha-migration.md` in the workspace repository.
 
 | topic | direction | payload |
 |---|---|---|
-| `T lease/<reg>/set` | → gateway | `{"value": -2, "ttl": 900, "owner": "ha"}`, not retained |
-| `T lease/<reg>/release` | → gateway | anything, not retained |
-| `T lease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, owner, error` |
-| `T gateway/state` | gateway →, retained, per minute | `version, leases, raw_set, core, lastData` |
+| `T<reg>` | gateway → | value in engineering units, e.g. `21.5` (mapped text for registers with a value map) |
+| `T<reg>/raw` | gateway → | raw value |
+| `T<reg>/json` | gateway → | JSON: `register, titel, data, raw_data, unit, timestamp, ...` |
+| `T<reg>/get` | → gateway | any; reads the register once |
+| `T<reg>/add`, `T<reg>/remove` | → gateway | any; adds the register to or removes it from continuous polling |
+| `T<reg>/set` | → gateway | value in engineering units; validated, and subject to `raw_set` and leases |
+| `Tadjust_s1/set`, `Tadjust_s2/set` | → gateway | sets `home.adjust_s1/_s2`, the neutral curve offset |
+| `Tadjust_s1/get`, `Tadjust_s2/get` | → gateway | publishes the current value on `Tadjust_s1` / `Tadjust_s2` |
+| `Tstatus` | gateway →, retained | `online` / `offline` (also the last will) |
+| `Tbus_health` | gateway →, per minute | JSON: `ok, chksum, no_respond, errors, timestamp` |
+| `Tlease/<reg>/set` | → gateway, **not retained** | `{"value": -2, "ttl": 900, "owner": "ha"}` |
+| `Tlease/<reg>/release` | → gateway, not retained | anything |
+| `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, owner, error` |
+| `Tgateway/state` | gateway →, retained, per minute | `version, leases, raw_set, core, lastData` |
+| `homeassistant/device/nibepi_<id>/config` | gateway →, retained | discovery, when `mqtt.discovery` is `true` |
 
-- Only registers in the lease table can be leased: curve offsets 47011/47010
-  (-10..10, restore to `home.adjust_s1`/`_s2`), 47041, 47134, 48132, and the
-  cut-off frequency registers 48659–48664. `gateway.leases` in the config
-  overrides entries (`{"<reg>": {"min", "max", "neutral", "min_interval"}}`,
-  `null` removes one).
-- The first request reads the current value from the pump as the baseline
-  and persists it. The value is written when it changes, at most once per
-  `min_interval` (the last value wins). `ttl` is clamped to 60..3600 s.
-- Without renewal the lease expires and the register is restored to its
-  neutral value, or else to the baseline; release does the same at once. A
-  failed restore is retried with backoff.
-- While leased, every other writer is refused: plain `T<reg>/set` and
-  Node-RED (`setData` gets `Register <reg> is leased by <owner>`).
-- `gateway.raw_set` limits plain `T<reg>/set`: `"all"` (default), `"none"`,
-  or a list of registers.
-- After a restart, a persisted baseline starts a grace lease of 900 s: renew
-  within it, or the register is restored.
+### Leases
 
-`node gateway.js` (`npm run gateway`) runs the backend without Node-RED:
-core, MQTT, leases and `/dev/shm/nibepi-health.json`, logging to stdout. It
-uses the same `/etc/nibepi/config.json`. Stopping it does not release
-leases; the grace lease covers the restart.
+- **Leasable registers.** Only registers in the lease table can be leased:
+  - curve offsets 47011 and 47010 (-10..10; they restore to
+    `home.adjust_s1` / `_s2`)
+  - hot water comfort mode 47041 and hot water period 47134
+  - temporary lux 48132
+  - the cut-off frequency registers 48659–48664
 
-## Enabling Modbus in the pump
+  To change the table, set `gateway.leases` to
+  `{"<reg>": {"min", "max", "neutral", "min_interval"}}`. Entries merge over
+  the defaults, and `null` removes one.
+- **First request.** The gateway reads the current value from the pump as the
+  baseline and persists it.
+- **Writes.** A value is written only when it changes, at most once per
+  `min_interval`; the last value wins. `ttl` is clamped to 60..3600 s.
+- **Expiry and release.** Without renewal the lease expires, and the gateway
+  restores the register to its neutral value or else to the baseline.
+  `release` restores it at once. A failed restore is retried with backoff.
+- **Other writers.** While a register is leased, the gateway refuses plain
+  `T<reg>/set` for it.
+- **Restarts.** After a restart, a persisted baseline starts a grace lease
+  of 900 s. Renew it within that time, or the register is restored.
+- **Before the model is known.** Until the pump has announced its model,
+  requests are rejected with `Heatpump is not ready yet.`; retry on the next
+  tick.
 
-Nothing works until the pump is told to talk. On the pump's own display:
+### Raw `/set` policy
 
-1. Hold the **Back** button for about 7 seconds to reveal the service menu.
-2. Go to **5.2 System settings** (on some models there is one more menu level).
-3. Near the bottom of the list, tick **Modbus**.
-4. The pump may show a red alarm until NibePi answers it, which can take a
-   couple of minutes on first start.
+`gateway.raw_set` (or `NIBEPI_RAW_SET`) controls plain `T<reg>/set`:
 
-For where to land the wires (12 V, A, B, GND) — it differs between models —
-see Nibe's own documentation:
+- `"all"` (the default): any read/write register the model allows
+- `"none"`: no plain writes; recommended once nibepi-ha is in use
+- a list of registers: only those
+
+A leased register always refuses plain writes.
+
+## Health file
+
+Every minute the gateway writes `NIBEPI_HEALTH_FILE` (default
+`/dev/shm/nibepi-health.json`) atomically:
+
+```json
+{"ts": 1760100000000, "core": "up", "model": "F1255", "lastData": 1760099990000,
+ "restarts": 0, "busHealth": {"ok": 120, "chksum": 0, "no_respond": 0, "errors": 0, "timestamp": 1760099960000},
+ "controllers": {}}
+```
+
+`core` is `starting`, `up` or `down`. A `HEALTHCHECK` can check that `ts` and
+`lastData` are recent. `/dev/shm` does not exist on macOS, so set
+`NIBEPI_HEALTH_FILE` when running there.
+
+## Connecting to the pump
+
+| mode | how |
+|---|---|
+| `serial` | RS485 adapter on a serial port, 9600 baud |
+| `nibegw` | UDP from a NibeGW. The gateway listens on `nibegw.port` (9999) and sends reads to 10000 and writes to 10001 on the NibeGW host. |
+
+The `nibegw` mode works with the original
+[NibeGW](https://github.com/openhab/openhab-addons/tree/main/bundles/org.openhab.binding.nibeheatpump)
+and with [elupus/esphome-nibe](https://github.com/elupus/esphome-nibe). For
+esphome-nibe, set `read_port` and `write_port` to `10000` and `10001`, and
+add the gateway's host to its `source:` list. Otherwise esphome-nibe drops
+the requests without replying.
+
+To enable Modbus on the pump, use the pump's own display:
+
+1. Hold **Back** for about 7 seconds to reveal the service menu.
+2. Go to **5.2 System settings**. On some models there is one more menu
+   level.
+3. Tick **Modbus**, near the bottom of the list. The pump may show an alarm
+   until the gateway answers it, which can take a couple of minutes.
+
+For wiring (12 V, A, B, GND), see Nibe's documentation:
 <https://www.nibe.fi/nibedocuments/15050/031725-6.pdf>
 
-Photographs of the physical install are in the
-[original repository](https://github.com/anerdins/nibepi).
+## Supported pumps
+
+Register tables ship for these models:
+
+- F370, F470, F730, F750
+- F1145, F1155, F1245, F1255, F1345, F1355
+- VVM225, VVM310, VVM320, VVM325, VVM500, VVM S320
+- SMO40, HMA60, SHK200S, STAR12, Tehowatti Air, VPK8R
+- RMU40 S1–S4
+
+The tables describe what a model *can* expose. A register that your pump's
+firmware or accessories don't provide never replies. S-series pumps (Modbus
+TCP) are no longer supported; see *History*.
+
+## History
+
+The gateway was the backend of the Node-RED version of NibePi. Node-RED is
+retired: node-red-contrib-nibepi and nibepi-flow are archived. Everything that
+only the Node-RED version needed was removed from this repository:
+
+- graph saving
+- the Node-RED integration
+- the read-only SD card handling
+- the Modbus TCP core for S-series pumps
+- per-plugin settings
+
+The last state before the cleanup is tagged **`nodered-final`**, so every
+removed file is still recoverable:
+
+```sh
+git show nodered-final:modbus-client.js
+git checkout nodered-final -- lib/saveGraph.js
+```
+
+NibePi was originally written by Fredrik Anerdin as
+[anerdins/nibepi](https://github.com/anerdins/nibepi). This repository is a
+fork of [fnordpojk/nibepi-backend](https://github.com/fnordpojk/nibepi-backend).
+The relationship is one-way: fixes from fnordpojk's upstream are pulled in
+here, but nothing is sent back. The npm package is still named `nibepi`.
 
 ## License
 
