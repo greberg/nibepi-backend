@@ -7,7 +7,6 @@ var PORT = 9999;
 // acknowledged every pending pump alarm. index.js resets only MODBUS alarm 251.
 const sendQueue = [[192,107,6,212,190,0,0,0,0,199]];
 const getQueue = [];
-var red = false;
 var regQueue = [];
 var regCount = 0;
 let checkACK = {};
@@ -58,8 +57,6 @@ process.on('message', (m) => {
         queueWrite(sendQueue, m.data);
     } else if(m.type=="regRegister") {
         regQueue = m.data;
-    } else if(m.type=="red") {
-        red = m.data;
     }
   });
   // Always exit when the parent goes away, as in backend.js.

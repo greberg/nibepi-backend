@@ -38,10 +38,7 @@ let rmu = {};
 let firmware = "";
 let register = [];
 let mqtt_client;
-let mqtt_subcribers = [];
-let mqttData = {};
 let discovery = {components:{}, removed:{}, cleared:false, timer:undefined};
-let red = false;
 let config;
 let leases;                // LeaseManager, created at the end of this file
 const regQueue = [];
@@ -70,7 +67,7 @@ if (!fs.existsSync(path)) {
 }
 const readJSON = (file) => JSON.parse(fs.readFileSync(file,'utf8'));
 // Set when the settings on disk could not be used; shown as a fault once
-// Node-RED has started the core, and the loaded config is written back.
+// the core is started, and the loaded config is written back.
 let configLoadFault;
 let configNeedsSave = false;
 // config.json used to be written in place, so a power cut could leave it
@@ -160,6 +157,12 @@ const writeFileAtomic = async (file,text) => {
     } catch(e) {}
 }
 config = loadConfig();
+// Sections the code reads without checking; an old or hand-edited file may
+// lack them. Unknown keys are kept as they are.
+for (const key of ['connection','serial','mqtt','system','log','home','gateway']) {
+    if(config[key]===null || typeof config[key]!=='object' || Array.isArray(config[key])) config[key] = {};
+}
+if(!Array.isArray(config.registers)) config.registers = [];
 // Mark where each run starts and ends, so the log can be read from a restart.
 // Written whenever file logging is on, whatever the categories. The stop line
 // relies on log.js writing synchronously: nothing asynchronous runs on 'exit'.
@@ -167,8 +170,7 @@ const logEnabled = () => config!==undefined && config.log!==undefined && config.
 // Replacement for .catch(console.log) on fire-and-forget reqData calls: no
 // stack traces, nothing while the pump has not announced its model yet, and
 // the same message at most once a minute (a noisy RS485 bus otherwise floods
-// the log with identical "No respond" lines). Same behaviour as the
-// logCatch helper in node-red-contrib-nibepi's config_node.js.
+// the log with identical "No respond" lines).
 const logCatchSeen = new Map();
 const logCatch = (err) => {
     const msg = err && err.message ? err.message : String(err);
@@ -221,40 +223,11 @@ if(process.env.NIBEPI_DOCKER!==undefined) {
     docker = (config.system.docker===true || String(config.system.docker).toLowerCase()==='true');
 }
 var timer;
-const updateConfig = (data) => {
-    // A partial or non-object config used to replace the settings and then
-    // throw below; ignore it instead.
-    if(data===null || typeof data!=='object' || Array.isArray(data)) {
-        console.log('[nibepi] Ignoring config update that is not an object');
-        if(config!==undefined && config.log!==undefined) log(config.log.enable,"Ignoring config update that is not an object",config.log['error'],"Config");
-        return;
-    }
-    const previous = config;
-    config = data;
-    for (const key of ['mqtt','system','log','home']) {
-        if(config[key]===null || typeof config[key]!=='object') config[key] = {};
-    }
-    // A whole config posted from the settings page has no gateway section:
-    // keep the previous one. The baselines always come from the live leases,
-    // so no config update can drop one that a restart still needs.
-    if(config.gateway===undefined && previous!==undefined && previous.gateway!==undefined) config.gateway = previous.gateway;
-    if(leases!==undefined) {
-        gatewayConfig().baselines = leases.baselines();
-        leases.setTable(Lease.buildTable(config.gateway.leases));
-    }
-    if(config.update===undefined) config.update = {}
-    if(config.update.version!==nibepi_version) {
-        config.update.version = nibepi_version
-    }
-        handleMQTT(config.mqtt.enable,config.mqtt.host,config.mqtt.port,config.mqtt.user,config.mqtt.pass, (err,result) => {
-            if(err) {
-                return console.log(err);
-            } else {
-
-            }
-        })
-    
-    nibeEmit.emit('config',config);
+// Called after config has been changed in place: the lease baselines are
+// taken from the live leases, so a save can never drop one that a restart
+// still needs.
+const updateConfig = () => {
+    if(leases!==undefined) gatewayConfig().baselines = leases.baselines();
     scheduleConfigSave();
 }
 // Debounced: settings often change in bursts.
@@ -284,7 +257,6 @@ const saveConfig = () => queueDisk(async () => {
         await writeFileAtomic(configFile,text);
         saved = true;
         log(config.log.enable,"Config file saved",config.log['info'],"Config");
-        nibeEmit.emit('fault',{from:"Inställningar",message:'Inställningarna är sparade till SD-kort'});
     } catch(err) {
         log(config.log.enable,err,config.log['error'],"Config");
     }
@@ -304,7 +276,7 @@ let core;
 // Core supervision. index.js tracks the core it forked: an unexpected exit is
 // reported and the core is forked again with backoff (2 s doubling to 60 s,
 // back to 2 s after 10 minutes up). stopCore() marks a stop as intended, so
-// port or series changes from Node-RED do not trigger a restart.
+// a shutdown does not trigger a restart.
 const RESTART_MIN_MS = 2000;
 const RESTART_MAX_MS = 60000;
 const RESTART_STABLE_MS = 600000;
@@ -338,7 +310,6 @@ const onBusStats = (stats) => {
         errors: stats.chksum + noRespondCount
     };
     noRespondCount = 0;
-    nibeEmit.emit('busHealth', busHealth);
     if(config!==undefined && config.mqtt!==undefined && config.mqtt.topic!==undefined) {
         publishMQTT(config.mqtt.topic+"bus_health", JSON.stringify(busHealth));
     }
@@ -359,7 +330,6 @@ const onBusStats = (stats) => {
         busSilentMinutes = 0;
     }
 };
-const getBusHealth = () => busHealth;
 const getHealth = () => {
     return {core:coreState, model:model, lastData:lastData, restarts:restartCount, busHealth:busHealth};
 }
@@ -402,7 +372,7 @@ const restartCore = (message) => {
     child.kill('SIGTERM');
 }
 const superviseCore = (child,gen) => {
-    // Without a listener a failed send to a dead core would throw in Node-RED.
+    // Without a listener a failed send to a dead core would throw.
     child.on('error', (err) => {
         console.log('Core process error: '+err.message);
     });
@@ -429,7 +399,6 @@ const superviseCore = (child,gen) => {
     });
 }
 // Stops the tracked core, plus the one passed in if that is another process.
-// stopCore(nibe.core) from node-red-contrib-nibepi keeps working, and
 // stopCore() with no argument stops the tracked core.
 const stopCore = (child) => {
     coreWanted = false;
@@ -465,7 +434,7 @@ const initiateCore = (host,port,cb) => {
         }
     }
     if(configLoadFault!==undefined) {
-        // Delayed so the 'fault' listeners in Node-RED are attached.
+        // Delayed so the caller's 'fault' listeners are attached.
         const text = configLoadFault;
         configLoadFault = undefined;
         setTimeout(() => {
@@ -505,7 +474,7 @@ const forkCore = () => {
     // are dropped.
     const fromCore = (handler) => (m) => {
         if(gen!==coreGen) return;
-        // An exception here would otherwise take Node-RED down with it.
+        // An exception here would otherwise take the gateway down with it.
         try {
             handler(m);
         } catch(err) {
@@ -549,7 +518,7 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                     } else if(m.type=="log") {
                         if(config.log===undefined) {
                             config.log = {};
-                            updateConfig(config);
+                            updateConfig();
                         }
                         log(config.log.enable,m.data,config.log[m.level],m.kind);
                     }
@@ -581,7 +550,7 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                     } else if(m.type=="log") {
                         if(config.log===undefined) {
                             config.log = {};
-                            updateConfig(config);
+                            updateConfig();
                         }
                         log(config.log.enable,m.data,config.log[m.level],m.kind);
                     }
@@ -635,7 +604,7 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                             } else if(m.type=="log") {
                                 if(config.log===undefined) {
                                     config.log = {};
-                                    updateConfig(config);
+                                    updateConfig();
                                 }
                                 log(config.log.enable,m.data,config.log[m.level],m.kind);
                             }
@@ -692,7 +661,7 @@ const announcment = (msg,cb) => {
         firmware = announced.firmware;
         config.system.pump = model;
         config.system.firmware = firmware;
-        updateConfig(config);
+        updateConfig();
         callback(null,announced);
         }
     if(model=="" && cachedModelFailed===false && config.system!==undefined && config.system.pump!==undefined && config.system.pump!=="" && config.system.firmware!==undefined && config.system.firmware!=="") {
@@ -764,7 +733,7 @@ const announcment = (msg,cb) => {
                 let text = `Pump firmware changed from ${firmware} to ${announced.firmware}`;
                 firmware = announced.firmware;
                 config.system.firmware = firmware;
-                updateConfig(config);
+                updateConfig();
                 console.log(text);
                 log(config.log.enable,text,config.log['info'],"Pump");
                 scheduleDiscovery();
@@ -791,8 +760,6 @@ const announcment = (msg,cb) => {
                 console.log('RMU40 System '+((-24)+msg.data[2])+' connected (read-only mode)');
             } else {
                 console.log('RMU40 System '+((-24)+msg.data[2])+' connected');
-                // EMIT HERE
-                nibeEmit.emit('rmu_ready','s'+((-24)+msg.data[2]));
             }
             console.log(`Register is set. Length: ${register.length}`)
             cb(null,false)
@@ -920,8 +887,8 @@ async function reqData (address) {
 // string errors are kept as they were for existing callers.
 const SET_WAIT_MS = 30000;
 const SET_ACK_MS = 60000;
-// Refused writes are logged at most once a minute per register: Node-RED
-// controllers retry a leased register on every run.
+// Refused writes are logged at most once a minute per register: a writer
+// may retry a leased register on every run.
 const refusalSeen = new Map();
 const logRefusal = (address,text) => {
     const key = String(address);
@@ -933,8 +900,7 @@ const logRefusal = (address,text) => {
     if(config.log!==undefined) log(config.log.enable,'Write refused: '+text,config.log['error'],"Gateway");
 }
 // opts.lease marks the lease module's own writes. While a register is leased
-// they are the only ones accepted, so HA and Node-RED controllers cannot
-// fight over it.
+// they are the only ones accepted, so two controllers cannot fight over it.
 const setData = (address,value,cb=()=>{},opts) => {
     if(typeof cb!=='function') cb = ()=>{};
     const fromLease = (opts!==undefined && opts!==null && opts.lease===true);
@@ -1175,7 +1141,7 @@ const addRegister = (address,logset=false) => {
         };
         if(config.registers===undefined) {
             config.registers = [];
-            updateConfig(config)
+            updateConfig()
         }
         if(register[index]!==undefined) register[index].logset = logset;
         let confIndex = config.registers.findIndex(confIndex => confIndex == address);
@@ -1185,7 +1151,7 @@ const addRegister = (address,logset=false) => {
             if(logset===false) {
                 addRegular(address);
             }
-            updateConfig(config)
+            updateConfig()
         }
     }
     }
@@ -1197,13 +1163,13 @@ function removeRegister(address) {
     };
     if(config.registers===undefined) {
         config.registers = [];
-        updateConfig(config)
+        updateConfig()
     }
     let confIndex = config.registers.findIndex(confIndex => confIndex == address);
     if(confIndex!==-1) {
         config.registers.splice(confIndex,1);
         removeMQTTdiscovery(register[index]);
-        updateConfig(config)
+        updateConfig()
         removeRegular(address);
     }
   }
@@ -1392,7 +1358,6 @@ async function decodeS(data) {
             register[index].data = data;
             register[index].raw_data = data;
             register[index].timestamp = timeNow;
-            nibeEmit.emit('data',register[index]);
             nibeEmit.emit(address,register[index]);
             addMQTTdiscovery(register[index]);
             publishMQTT(config.mqtt.topic+address+"/json",JSON.stringify(register[index]))
@@ -1417,7 +1382,6 @@ async function decodeS(data) {
             timestamp:timeNow
         }
         log(config.log.enable,JSON.stringify(output),config.log['debug'],"Data");
-        nibeEmit.emit('data',output);
         nibeEmit.emit(address,output);
     }
 }
@@ -1539,7 +1503,6 @@ const decodeMessage = (buf) => {
                 }
                 register[index].raw_data = data;
                 register[index].timestamp = timeNow;
-                nibeEmit.emit('data',register[index]);
                 
                 nibeEmit.emit(address,register[index]);
                 addMQTTdiscovery(register[index]);
@@ -1563,10 +1526,6 @@ const decodeMessage = (buf) => {
 }
 const getConfig = () => {
     //nibeEmit.emit('config',config);
-    return config;
-}
-const refreshConfig = () => {
-    nibeEmit.emit('config',config);
     return config;
 }
 
@@ -1604,11 +1563,9 @@ function startMQTT(host,port,user,pass) {
     // reconnects by itself (reconnectPeriod) and resubscribes on reconnect.
     const client = mqtt.connect('mqtt://' + mqtt_host, mqtt_Options);
     mqtt_client = client;
-    let firstConnect = true;
     client.on('connect', function () {
         if(client!==mqtt_client) return;
         mqttErrorShown = false;
-        nibeEmit.emit('fault',{from:"MQTT",message:'MQTT Brokern är ansluten'});
         console.log("MQTT Broker is connected.")
         client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
         client.subscribe('homeassistant/status');
@@ -1619,27 +1576,16 @@ function startMQTT(host,port,user,pass) {
         leases.publishAll(true);
         cleanOldDiscovery();
         scheduleDiscovery();
-        if(firstConnect===true) {
-            firstConnect = false;
-            config.mqtt.host = host;
-            config.mqtt.port = port;
-            config.mqtt.enable = true;
-            updateSensors(config);
-        }
         resolve(client);
     });
     client.on('close',function(err){
-        if (client.reconnecting === false) {
-            nibeEmit.emit('fault',{from:"MQTT",message:'MQTT Brokern är frånkopplad'});
-        }
         console.log("MQTT Broker is disconnected")
     });
-    // Not ended on error: the broker may simply start after Node-RED, and the
+    // Not ended on error: the broker may simply start after the gateway, and the
     // client keeps retrying. Reported once until the next successful connect.
     client.on('error',function(error){
         if(client===mqtt_client && mqttErrorShown===false) {
             mqttErrorShown = true;
-            nibeEmit.emit('fault',{from:"MQTT",message:'Kunde inte ansluta till MQTT Brokern'});
             console.log("Could not connect to MQTT broker: "+(error && error.message ? error.message : error))
         }
         reject(error);
@@ -1659,7 +1605,7 @@ function discoveryId() {
     if(config.system===undefined) config.system = {};
     if(config.system.id===undefined || config.system.id===0 || config.system.id==="") {
         config.system.id = require('crypto').randomBytes(5).toString('hex');
-        updateConfig(config);
+        updateConfig();
     }
     return 'nibepi_'+config.system.id;
 }
@@ -1727,7 +1673,7 @@ function publishDiscovery() {
 function addMQTTdiscovery(data) {
     if(config.mqtt===undefined) {
         config.mqtt = {};
-        updateConfig(config);
+        updateConfig();
     }
     if(config.mqtt.discovery!==true) {
         if(discovery.cleared!==true) {
@@ -1786,7 +1732,7 @@ function onLeaseMessage(topic, message, packet) {
     job.catch(err => gatewayLog(`Lease ${reg}: ${err && err.message ? err.message : err}`));
 }
 // Incoming MQTT messages: Home Assistant status, old discovery objects,
-// subscribed sensors, leases and <topic><register>/set|get|add|remove.
+// leases and <topic><register>/set|get|add|remove.
 function onMQTTMessage(topic, message, packet) {
     if(topic==='homeassistant/status') {
         if(message.toString()==='online') scheduleDiscovery();
@@ -1796,22 +1742,7 @@ function onMQTTMessage(topic, message, packet) {
         clearOldDiscovery(topic,message);
         return;
     }
-    let subTopic = config.mqtt.topic;
-    let subscribed = false;
-    for (const arr of mqtt_subcribers) {
-        if(topic===arr) {
-            let save = topic.replace(/\//g,"_");
-            let messageString = message.toString().replace(/\,/g,".");
-            if(mqttData[save]===undefined) mqttData[save] = {};
-            mqttData[save].data = Number(messageString);
-            mqttData[save].raw_data = Number(messageString);
-            mqttData[save].register = save;
-            mqttData[save].timestamp = Date.now();
-            nibeEmit.emit('mqttData',mqttData[save]);
-            subscribed = true;
-        }
-    }
-    if(subscribed===false && topic.includes(subTopic)) {
+    if(topic.startsWith(config.mqtt.topic)) {
         topic = topic.replace(config.mqtt.topic,'')
         topic = topic.split('/');
         // Before the generic handlers: lease/47011/set is no raw set of a
@@ -1828,7 +1759,7 @@ function onMQTTMessage(topic, message, packet) {
                 if(Number.isFinite(value)) {
                     if(config.home===undefined) config.home = {};
                     config.home.adjust_s1 = value;
-                    updateConfig(config);
+                    updateConfig();
                     publishMQTT(config.mqtt.topic+"adjust_s1",config.home.adjust_s1)
                 }
             } else if(topic.includes('get')) {
@@ -1841,7 +1772,7 @@ function onMQTTMessage(topic, message, packet) {
                 if(Number.isFinite(value)) {
                     if(config.home===undefined) config.home = {};
                     config.home.adjust_s2 = value;
-                    updateConfig(config);
+                    updateConfig();
                     publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
                 }
             } else if(topic.includes('get')) {
@@ -1924,92 +1855,6 @@ const publishMQTTpromise = (topic,message,retain=false) => {
 });
 return promise;
 }
-const redOn = (enable=true) => {
-    if(core!==undefined && core.connected===true) core.send({type:"red",data:enable});
-}
-const updateSensors = (config) => {
-    if(config.home===undefined) {
-        config.home = {};
-        updateConfig(config);
-    }
-	if(config.home.inside_sensors===undefined) {
-        config.home.inside_sensors = [];
-        updateConfig(config);
-    }
-	
-    for (const arr of config.home.inside_sensors) {
-        if(arr.source=="mqtt") {
-            let found = false;
-            for (i = 0; i < mqtt_subcribers.length; i = i + 1) {
-                if(mqtt_subcribers[i]===arr.register) found = true;
-            }
-            if(found===false) {
-                mqtt_subcribers.push(arr.register);
-            }
-        }
-    }
-    if(mqtt_client!==undefined && mqtt_client.connected===true) {
-        for (const arr of mqtt_subcribers) {
-            mqtt_client.subscribe(arr);
-        }
-        // Once for the whole list, not once per sensor: every updateSensor
-        // restarts all plugins through 'ready' in node-red-contrib-nibepi.
-        if(mqtt_subcribers.length!==0) nibeEmit.emit('updateSensor',true);
-    }
-}
-const addSensor = (data) => {
-    updateConfig(data);
-    updateSensors(data);
-}
-const removeSensor = (data) => {
-    if(data===undefined || data===null || config.home===undefined) return;
-    if(config.home.inside_sensors!==undefined) {
-        let i = config.home.inside_sensors.findIndex(i => i.register == data.register);
-        if(i!==-1) {
-            config.home.inside_sensors.splice(i,1);
-            // Compared with the topic: comparing with the sensor object never
-            // matched, and splice(-1,1) then removed the last subscriber.
-            i = mqtt_subcribers.findIndex(i => i == data.register);
-            if(i!==-1) mqtt_subcribers.splice(i,1);
-            let mqttRemove = String(data.register).replace(/\//g,"_");
-            delete mqttData[mqttRemove];
-            updateConfig(config);
-            if(mqtt_client!==undefined) mqtt_client.unsubscribe(data.register);
-            nibeEmit.emit('updateSensor',true);
-        }
-    }
-}
-const getMQTTData = (data) => {
-    const promise = new Promise((resolve,reject) => {
-        if(data!==undefined) data = data.replace(/\//g,"_");
-    if(mqttData[data]!==undefined) {
-        resolve(mqttData[data]);
-    } else {
-        reject({})
-    }
-    });
-    return promise;
-}
-const writeLog = (data,plugin,level) => {
-    let from = "System";
-    if(plugin=="fan") from = "Automatiskt luftflöde";
-    if(plugin=="hw") from = "Varmvattenreglering";
-    // The contrib package passes "hotwater" and "price"; "hw" is legacy and is
-    // passed by nothing. Without these the messages were labelled "System",
-    // and config.log[plugin] never matched so they were never written to file.
-    if(plugin=="hotwater") from = "Varmvattenreglering";
-    if(plugin=="price") from = "Elprisreglering";
-    if(plugin=="weather") from = "Prognosreglering";
-    if(plugin=="diagnostic") from = "Diagnostik";
-    if(level=="info" || level=="error") {
-        nibeEmit.emit('fault',{from:from,message:data});
-    }
-    if(config.log[plugin]!==undefined) {
-        log(config.log.enable,data,config.log[plugin],from);
-    }
-    
-    return;
-}
 const setDocker = (cmd) => {
     docker = cmd;
 }
@@ -2067,7 +1912,7 @@ leases = new Lease.LeaseManager({
     if(grace.length!==0) {
         const text = `Lease aktiv vid omstart för register ${grace.join(', ')}, återställs om ${Lease.DEFAULT_TTL/60} minuter om den inte förnyas`;
         gatewayLog(`Grace lease for ${grace.join(', ')}: restored in ${Lease.DEFAULT_TTL} s unless renewed`);
-        // Delayed so the 'fault' listeners in Node-RED are attached.
+        // Delayed so the caller's 'fault' listeners are attached.
         setTimeout(() => nibeEmit.emit('fault',{from:"Gateway",message:text}), 10000);
     }
 }
@@ -2111,19 +1956,10 @@ module.exports = {
     removeRegister:removeRegister,
     initiateCore:initiateCore,
     stopCore:stopCore,
-    resetCore:resetCore,
     data:nibeEmit,
     getConfig:getConfig,
-    setConfig:updateConfig,
     getRegister:getRegister,
-    getBusHealth:getBusHealth,
     getHealth:getHealth,
     handleMQTT:handleMQTT,
-    redOn:redOn,
-    addSensor: addSensor,
-    removeSensor: removeSensor,
-    getMQTTData:getMQTTData,
-    log:writeLog,
-    setDocker:setDocker,
-    refreshConfig:refreshConfig
+    setDocker:setDocker
 }

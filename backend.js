@@ -43,7 +43,6 @@ var regQueue = [];
 var regCount = 0;
 var msgOut = Buffer.alloc(0);
 var rmu_buffer = Buffer.alloc(0);
-var red = false;
 var fs_start = false;
 var rmu_start = false;
 let other_start = false;
@@ -114,8 +113,6 @@ process.on('message', (m) => {
         queueWrite(rmuQueue, m.data, (msg) => msg.address, "rmuSet");
     } else if(m.type=="regRegister") {
         regQueue = m.data;
-    } else if(m.type=="red") {
-        red = m.data;
     } else if(m.type=="rmuEmulation") {
         rmuEmulation = m.data!==false;
         if(rmuEmulation===false) {
@@ -123,8 +120,8 @@ process.on('message', (m) => {
         }
     }
   });
-  // Always exit when the parent goes away. The 'red' flag used to keep a
-  // detached core running here, holding the serial port, after Node-RED died.
+  // Always exit when the parent goes away, so no orphaned core keeps
+  // holding the serial port.
   process.on('disconnect', (m) => {
       console.log('Shutting down the core.')
       process.exit(99);

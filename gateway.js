@@ -39,7 +39,6 @@ function startCore() {
         const conf = nibe.getConfig();
         const name = connection.series==="sSeries" ? conf.tcp.pump : (conf.system!==undefined ? conf.system.pump : '');
         console.log(`Nibe ${name} is connected`);
-        nibe.redOn();
     };
     if(connection.series==="fSeries") {
         if(serial.port!==undefined && serial.port!=="" && (connection.enable==="serial" || connection.enable==="nibegw")) {
