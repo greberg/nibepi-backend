@@ -299,6 +299,31 @@ const updateConfig = (data) => {
 
 let core;
 const reportedMissing = new Set();
+// RS485 bus health per minute: frame counts from the core (backend.js) plus
+// reads that timed out here. Emitted as 'busHealth', published to MQTT as
+// <topic>bus_health, and logged as one line when there were errors.
+let noRespondCount = 0;
+let busHealth;
+const onBusStats = (stats) => {
+    busHealth = {
+        timestamp: Date.now(),
+        ok: stats.ok,
+        chksum: stats.chksum,
+        no_respond: noRespondCount,
+        errors: stats.chksum + noRespondCount
+    };
+    noRespondCount = 0;
+    nibeEmit.emit('busHealth', busHealth);
+    if(config!==undefined && config.mqtt!==undefined && config.mqtt.topic!==undefined) {
+        publishMQTT(config.mqtt.topic+"bus_health", JSON.stringify(busHealth));
+    }
+    if(busHealth.errors>0) {
+        const text = `Bus last minute: ${busHealth.ok} ok, ${busHealth.chksum} CHKSUM, ${busHealth.no_respond} No respond`;
+        console.log(text);
+        if(config!==undefined && config.log!==undefined) log(config.log.enable,text,config.log['info'],"Bus");
+    }
+};
+const getBusHealth = () => busHealth;
 const resetCore = () => {
     model = "";
     reportedMissing.clear();
@@ -358,6 +383,8 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                         nibeEmit.emit('fault',m.data);
                     } else if(m.type=="ack") {
                         nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
+                    } else if(m.type=="busStats") {
+                        onBusStats(m.data);
                     } else if(m.type=="log") {
                         if(config.log===undefined) {
                             config.log = {};
@@ -630,6 +657,7 @@ async function reqData (address) {
                 if(settled===true) return;
                 if(register[index]!==undefined || config.system.testmode===true) {
                     failTimer = setTimeout(() => {
+                        noRespondCount++;
                         finish(new Error('No respond from register ('+address+')'));
                     }, 30000);
                     if(register[index]!==undefined) register[index].logset = false;
@@ -663,6 +691,7 @@ async function reqData (address) {
                 const listener = (data) => { finish(null,data); };
                 nibeEmit.on(address,listener);
                 failTimer = setTimeout(() => {
+                    noRespondCount++;
                     finish(new Error('No respond from register ('+address+')'));
                 }, 30000);
                 core.send({type:"reqData",data:address});
@@ -1670,6 +1699,7 @@ module.exports = {
     getConfig:getConfig,
     setConfig:updateConfig,
     getRegister:getRegister,
+    getBusHealth:getBusHealth,
     handleMQTT:handleMQTT,
     redOn:redOn,
     addSensor: addSensor,

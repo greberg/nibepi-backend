@@ -52,6 +52,13 @@ let checkACK = {};
 // system.rmu_emulation=false in config.json it never answers - for a bus
 // with a physical RMU40 that the auto-detection misses.
 let rmuEmulation = true;
+// Bus health: good and corrupted frames, reported to index.js once a minute.
+const busStats = {ok:0, chksum:0};
+setInterval(() => {
+    if(process.connected===true) process.send({type:"busStats",data:{ok:busStats.ok,chksum:busStats.chksum}});
+    busStats.ok = 0;
+    busStats.chksum = 0;
+}, 60000);
 process.on('message', (m) => {
     if(m.start===true) {
         if(m.port!==undefined) {
@@ -192,6 +199,7 @@ function analyzeData(data) {
                                         }
                                         result[result.length-1] = calcChecksum;
                                     }
+                                    busStats.ok++;
                                     if(process.connected===true) {
                                         process.send({type:"data",data:result,rmu:checkACK[result[2]]});
                                         process.send({type:"log",data:result,level:"debug",kind:"OK"});
@@ -202,6 +210,7 @@ function analyzeData(data) {
                             })
                         }, err => {
                             err = Array.from(err);
+                            busStats.chksum++;
                             console.log(`CHKSUM ERROR: ${err}`)
                             if(process.connected===true) {
                                 process.send({type:"log",data:err,level:"error",kind:"CHKSUM"});
