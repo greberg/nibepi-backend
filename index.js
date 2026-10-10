@@ -50,7 +50,6 @@ const nibeEmit = new EventEmitter();
 const fs = require('fs');
 const path = "/etc/nibepi"
 const configFile = path+'/config.json';
-const graphFile = path+'/graph.json';
 if (!fs.existsSync(path)) {
     // Plain mkdir works in the container and wherever the user may create it;
     // the sudo route is for a bare Pi with a read-only root filesystem.
@@ -114,17 +113,6 @@ function loadConfig() {
     }
     configLoadFault = 'Inställningsfilen var skadad och kunde inte återställas, standardinställningar används.'+kept;
     return readJSON(__dirname+'/default.json');
-}
-function requireGraph(){
-    const promise = new Promise((resolve,reject) => {
-        for (const file of [graphFile, graphFile+'.bak']) {
-            try {
-                return resolve(readJSON(file));
-            } catch (e) {}
-        }
-        reject('No graphs to load.')
-    });
-    return promise;
 }
 // All disk writes go through one chain, so the remount rw/ro of one save
 // cannot interleave with another write.
@@ -233,49 +221,6 @@ if(process.env.NIBEPI_DOCKER!==undefined) {
     docker = (config.system.docker===true || String(config.system.docker).toLowerCase()==='true');
 }
 var timer;
-const saveGraph = (data) => {
-    if(config.system===undefined || config.system.save_graph!==true) return Promise.reject();
-    if(data===undefined) return Promise.reject(new Error('Cant save empty graph'));
-    if(config.log===undefined) config.log = {};
-    return queueDisk(async () => {
-        const text = JSON.stringify(data,null,2);
-        if(docker===true) {
-            // Container: the filesystem is already writable and there is no SD
-            // card to protect, so skip the remount dance entirely.
-            try {
-                await writeFileAtomic(graphFile,text);
-            } catch(err) {
-                throw new Error('Error saving graph to disc, write error');
-            }
-            log(config.log.enable,"Graphs saved",config.log['info'],"Graph");
-            return 'Graferna sparade';
-        }
-        try {
-            await execPromise('sudo mount -o remount,rw /');
-        } catch(error) {
-            log(config.log.enable,"Could not open the system for write mode",config.log['error'],"Config");
-            throw new Error('Error saving graph, could not set RW mode');
-        }
-        let writeError;
-        try {
-            await writeFileAtomic(graphFile,text);
-            log(config.log.enable,"Graphs saved",config.log['info'],"Graph");
-            nibeEmit.emit('fault',{from:"Grafer",message:'Graferna är sparade till SD-kort'});
-        } catch(err) {
-            writeError = new Error('Error saving graph to disc, write error');
-        }
-        if(config.system.readonly===true) {
-            try {
-                await execPromise('sudo mount -o remount,ro /');
-                console.log('Read only mode set.')
-            } catch(error) {
-                nibeEmit.emit('fault',{from:"Grafer",message:'Kunde inte sätta läsbart läge på filsystemet.'});
-            }
-        }
-        if(writeError!==undefined) throw writeError;
-        return 'Graferna sparade till SD-kort';
-    });
-}
 const updateConfig = (data) => {
     // A partial or non-object config used to replace the settings and then
     // throw below; ignore it instead.
@@ -2179,8 +2124,6 @@ module.exports = {
     removeSensor: removeSensor,
     getMQTTData:getMQTTData,
     log:writeLog,
-    saveGraph:saveGraph,
-    requireGraph:requireGraph,
     setDocker:setDocker,
     refreshConfig:refreshConfig
 }
