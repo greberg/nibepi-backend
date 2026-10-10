@@ -1,0 +1,21 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: JavaScript syntax
+        run: git ls-files '*.js' | xargs -n1 node --check
+      - name: JSON files parse
+        run: |
+          git ls-files '*.json' | while read -r f; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$f" || { echo "invalid JSON: $f"; exit 1; }
+          done
