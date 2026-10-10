@@ -1088,8 +1088,8 @@ async function decodeS(data) {
     var index = register.findIndex(index => index.register == address);
     if (index!==-1) {
         if (register[index].size == "s32") {
-            if (data >= 2147483647) {
-                data = (data - 4294967294);
+            if (data >= 2147483648) {
+                data = (data - 4294967296);
             }
         }
         else if (register[index].size == "s16") {
@@ -1098,7 +1098,7 @@ async function decodeS(data) {
             }          
         }
         else if (register[index].size == "s8") {
-            if (data > 128 && data < 32768) {
+            if (data >= 128 && data < 32768) {
                 data = data - 256;
             } else if (data >= 32768) {
                 data = data - 65536;
@@ -1176,8 +1176,8 @@ const decodeMessage = (buf) => {
                 if (buf[3]===104) {
                     data = buf[i + 2] | buf[i + 3]<<8 | buf[i + 6] <<16 | buf[i + 7] <<24;
                     
-                    if (data >= 2147483647) {
-                        data = (data - 4294967294);
+                    if (data >= 2147483648) {
+                        data = (data - 4294967296);
                     }
                     i = i + 7;
                 }
@@ -1185,8 +1185,8 @@ const decodeMessage = (buf) => {
                     data = buf[i + 4] | buf[i + 5] <<8 | buf[i + 2] <<16 | buf[i + 3] <<24;
                     //data = buf[i + 2] | buf[i + 3] <<8 | buf[i + 4] <<16 | buf[i + 5] <<24;
                     
-                    if (data >= 2147483647) {
-                        data = (data - 4294967294);
+                    if (data >= 2147483648) {
+                        data = (data - 4294967296);
                     }
                     i = i + 5;
                 }
@@ -1203,7 +1203,7 @@ const decodeMessage = (buf) => {
                 data = (buf[i + 3] & 0xFF) << 8 | (buf[i + 2] & 0xFF);
                 
                 i = i + 3;
-                if (data > 128 && data < 32768) {
+                if (data >= 128 && data < 32768) {
                     data = data - 256;
                 } else if (data >= 32768) {
                     data = data - 65536;
