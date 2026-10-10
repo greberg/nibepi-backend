@@ -27,6 +27,7 @@ const startCore = Core.startCoreF;
 const startCoreS = Core.startCoreS;
 const startNibeGW = Core.startNibeGW;
 const stopCoreProcess = require(__dirname+'/lib/stopCore');
+const Lease = require(__dirname+'/lib/lease');
 var log = require('./log');
 var child = require('child_process');
 var docker = false;
@@ -42,6 +43,7 @@ let mqttData = {};
 let discovery = {components:{}, removed:{}, cleared:false, timer:undefined};
 let red = false;
 let config;
+let leases;                // LeaseManager, created at the end of this file
 const regQueue = [];
 const EventEmitter = require('events').EventEmitter
 const nibeEmit = new EventEmitter();
@@ -282,9 +284,18 @@ const updateConfig = (data) => {
         if(config!==undefined && config.log!==undefined) log(config.log.enable,"Ignoring config update that is not an object",config.log['error'],"Config");
         return;
     }
+    const previous = config;
     config = data;
     for (const key of ['mqtt','system','log','home']) {
         if(config[key]===null || typeof config[key]!=='object') config[key] = {};
+    }
+    // A whole config posted from the settings page has no gateway section:
+    // keep the previous one. The baselines always come from the live leases,
+    // so no config update can drop one that a restart still needs.
+    if(config.gateway===undefined && previous!==undefined && previous.gateway!==undefined) config.gateway = previous.gateway;
+    if(leases!==undefined) {
+        gatewayConfig().baselines = leases.baselines();
+        leases.setTable(Lease.buildTable(config.gateway.leases));
     }
     if(config.update===undefined) config.update = {}
     if(config.update.version!==nibepi_version) {
@@ -964,8 +975,31 @@ async function reqData (address) {
 // string errors are kept as they were for existing callers.
 const SET_WAIT_MS = 30000;
 const SET_ACK_MS = 60000;
-const setData = (address,value,cb=()=>{}) => {
+// Refused writes are logged at most once a minute per register: Node-RED
+// controllers retry a leased register on every run.
+const refusalSeen = new Map();
+const logRefusal = (address,text) => {
+    const key = String(address);
+    const now = Date.now();
+    const at = refusalSeen.get(key);
+    if(at!==undefined && now-at<60000) return;
+    refusalSeen.set(key,now);
+    console.log('[nibepi] Write refused: '+text);
+    if(config.log!==undefined) log(config.log.enable,'Write refused: '+text,config.log['error'],"Gateway");
+}
+// opts.lease marks the lease module's own writes. While a register is leased
+// they are the only ones accepted, so HA and Node-RED controllers cannot
+// fight over it.
+const setData = (address,value,cb=()=>{},opts) => {
     if(typeof cb!=='function') cb = ()=>{};
+    const fromLease = (opts!==undefined && opts!==null && opts.lease===true);
+    const leaseRefusal = () => {
+        const err = leases!==undefined ? leases.writeRefusal(address,fromLease) : null;
+        if(err!==null) logRefusal(address,err.message);
+        return err;
+    };
+    const refused = leaseRefusal();
+    if(refused!==null) return cb(refused);
     console.log(`Setting data in register ${address}: ${value}`)
     let done = false;
     let waitTimer;
@@ -983,6 +1017,9 @@ const setData = (address,value,cb=()=>{}) => {
     const coreUp = () => (core!==undefined && core.connected===true);
     const ready = () => coreUp() && (config.connection===undefined || config.connection.series!=="fSeries" || model.length!==0);
     const send = () => {
+        // The lease may have started while this write waited for the core.
+        const refused = leaseRefusal();
+        if(refused!==null) return finish(refused);
         var output = setDataValue({register:address,value:value});
         if(output===-1) return finish('Register dont exist');
         if(output===-2) return finish('Register not writeable');
@@ -1053,39 +1090,59 @@ const parseWriteValue = (value) => {
     if(text==='') return NaN;
     return Number(text);
 }
+// Raw value for writing value to item: {raw}, or {code:-4} for a value that
+// is not a number and {code:-3,value} for one out of range. Shared by
+// setDataValue and validateWrite, which must agree.
+const checkWriteValue = (item,input) => {
+    // "abc", "", undefined or a Buffer used to become NaN or 0 here, and
+    // NaN passed the range checks and was written as 0.
+    let value = parseWriteValue(input);
+    let factor = Number(item.factor);
+    if(!Number.isFinite(value) || !Number.isFinite(factor) || factor===0) return {code:-4};
+    let raw = Math.round(value*factor);
+    // Always within what the register size can hold, and within the
+    // model's min/max unless both are 0. Out of range is rejected, not
+    // clamped: a clamped value is still a value nobody asked for.
+    let min = Number(item.min);
+    let max = Number(item.max);
+    let range = sizeRange[item.size] || sizeRange.any;
+    let outside = (raw<range[0] || raw>range[1]);
+    if(min!==0 || max!==0) {
+        if(raw>max || raw<min) outside = true;
+    }
+    if(outside===true) return {code:-3,value:value};
+    return {code:0,raw:raw};
+}
+// The checks setData makes before writing, without writing, faults or logs:
+// null when value may be written to address, else the reason.
+const validateWrite = (address,value) => {
+    const item = register.find(item => item.register == address);
+    if(item===undefined) return register.length===0 ? 'Heatpump is not ready yet.' : 'Register dont exist';
+    if(item.mode!=="R/W") return 'Register not writeable';
+    const check = checkWriteValue(item,value);
+    if(check.code===-4) return 'Invalid value ('+value+') for register '+address;
+    if(check.code===-3) return 'Value ('+value+') out of range for register '+address;
+    return null;
+}
 function setDataValue(incoming) {
     var item = register.find(item => item.register == incoming.register);
     if(item!==undefined) {
     var data = [];
     var rmu = {data:[],address:incoming.register,ackback:[]};
         if(item.mode=="R/W") {
-            var min = Number(item.min);
-            var max = Number(item.max);
             var corruptData;
-            // "abc", "", undefined or a Buffer used to become NaN or 0 here, and
-            // NaN passed the range checks and was written as 0.
-            let value = parseWriteValue(incoming.value);
-            let factor = Number(item.factor);
-            if(!Number.isFinite(value) || !Number.isFinite(factor) || factor===0) {
+            let check = checkWriteValue(item,incoming.value);
+            if(check.code===-4) {
                 nibeEmit.emit('fault',{from:"Skicka värde",message:'Ogiltigt värde ('+incoming.value+') till register '+incoming.register+', skickas inte.'});
                 log(config.log.enable,'Invalid value ('+incoming.value+') to register '+incoming.register+', not sent',config.log['error'],"Data");
                 return -4;
             }
-            let raw = Math.round(value*factor);
-            // Always within what the register size can hold, and within the
-            // model's min/max unless both are 0. Out of range is rejected, not
-            // clamped: a clamped value is still a value nobody asked for.
-            let range = sizeRange[item.size] || sizeRange.any;
-            let outside = (raw<range[0] || raw>range[1]);
-            if(min!==0 || max!==0) {
-                if(raw>max || raw<min) outside = true;
-            }
-            if(outside===true) {
-                nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+value+') utanför giltigt värde som får skickas.'});
-                log(config.log.enable,'Data ('+value+') out of range, to register '+incoming.register,config.log['error'],"Data");
+            if(check.code===-3) {
+                nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+check.value+') utanför giltigt värde som får skickas.'});
+                log(config.log.enable,'Data ('+check.value+') out of range, to register '+incoming.register,config.log['error'],"Data");
                 return -3;
             }
-            incoming.value = raw;
+            incoming.value = check.raw;
             if(config.connection.enable!==undefined && (config.connection.enable=="serial" || config.connection.enable=="nibegw")) {
                 if(item.register.charAt(0)=="1") {
                     let len = 0x03;
@@ -1983,9 +2040,57 @@ const writeLog = (data,plugin,level) => {
 const setDocker = (cmd) => {
     docker = cmd;
 }
+const gatewayConfig = () => {
+    if(config.gateway===null || typeof config.gateway!=='object' || Array.isArray(config.gateway)) config.gateway = {};
+    return config.gateway;
+}
+const gatewayLog = (message) => {
+    console.log('[nibepi] '+message);
+    if(config.log!==undefined) log(config.log.enable,message,config.log['info'],"Gateway");
+}
+const publishLeaseState = (reg,state) => {
+    publishMQTT(config.mqtt.topic+'lease/'+reg+'/state',JSON.stringify(state),true);
+}
+// Register leases (lib/lease.js). Created last, once everything it calls is
+// defined. Baselines go to config.gateway.baselines only on acquire and
+// restore, never on renewals: every save is an SD card write.
+leases = new Lease.LeaseManager({
+    table: Lease.buildTable(gatewayConfig().leases),
+    write: (reg,value) => new Promise((resolve,reject) => {
+        setData(reg,value,(err,ack) => {
+            if(err) return reject(err instanceof Error ? err : new Error(String(err)));
+            // S-series cores answer a refused write with ack false.
+            if(ack===false) return reject(new Error('Write to register '+reg+' was not acknowledged'));
+            resolve(ack);
+        },{lease:true});
+    }),
+    read: (reg) => reqData(reg).then(data => Number(data.raw_data)),
+    validate: validateWrite,
+    persist: (baselines) => {
+        gatewayConfig().baselines = baselines;
+        return saveConfig().then(saved => {
+            if(saved!==true) throw new Error('config.json could not be saved');
+        });
+    },
+    publish: publishLeaseState,
+    fault: (message) => nibeEmit.emit('fault',{from:"Gateway",message:message}),
+    log: gatewayLog,
+    neutral: (reg,spec) => Lease.neutralValue(spec,config)
+});
+{
+    const grace = leases.start(gatewayConfig().baselines);
+    if(grace.length!==0) {
+        const text = `Lease aktiv vid omstart för register ${grace.join(', ')}, återställs om ${Lease.DEFAULT_TTL/60} minuter om den inte förnyas`;
+        gatewayLog(`Grace lease for ${grace.join(', ')}: restored in ${Lease.DEFAULT_TTL} s unless renewed`);
+        // Delayed so the 'fault' listeners in Node-RED are attached.
+        setTimeout(() => nibeEmit.emit('fault',{from:"Gateway",message:text}), 10000);
+    }
+}
 module.exports = {
     reqData:reqData,
     setData:setData,
+    validateWrite:validateWrite,
+    getLeases:() => leases,
     addRegister:addRegister,
     removeRegister:removeRegister,
     initiateCore:initiateCore,
