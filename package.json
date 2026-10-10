@@ -19,6 +19,7 @@
   "name": "nibepi",
   "scripts": {
     "start": "node index.js",
+    "gateway": "node gateway.js",
     "test": "node --test test/*.test.js"
   },
   "version": "2.0.0",

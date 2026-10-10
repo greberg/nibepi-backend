@@ -2131,11 +2131,37 @@ let gatewayTimer = setInterval(() => {
     publishGatewayState();
     leases.publishAll();
 }, 60000);
+// Clean stop for gateway.js. Nothing is released or restored: the persisted
+// baselines start grace leases on the next run, so the owner can renew
+// across a restart. A pending config save is written first, and MQTT says
+// offline itself since a clean disconnect does not fire the last will.
+const shutdown = async () => {
+    clearInterval(gatewayTimer);
+    leases.stop();
+    if(timer!==undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+        await saveConfig().catch(() => {});
+    }
+    await diskQueue;
+    const client = mqtt_client;
+    if(client!==undefined) {
+        mqtt_client = undefined;
+        mqttKey = undefined;
+        const within = (ms,work) => Promise.race([new Promise(resolve => work(resolve)), new Promise(resolve => setTimeout(resolve,ms))]);
+        if(client.connected===true) {
+            await within(2000, done => client.publish(config.mqtt.topic+'status','offline',{qos:1, retain:true}, () => done()));
+        }
+        await within(2000, done => client.end(false, {}, () => done()));
+    }
+    await stopCore();
+}
 module.exports = {
     reqData:reqData,
     setData:setData,
     validateWrite:validateWrite,
     getLeases:() => leases,
+    shutdown:shutdown,
     addRegister:addRegister,
     removeRegister:removeRegister,
     initiateCore:initiateCore,
