@@ -1,27 +1,28 @@
 {
+  "name": "nibepi",
+  "version": "2.0.0",
+  "description": "RS485/MQTT gateway for Nibe heat pumps",
+  "keywords": [
+    "nibepi",
+    "nibe",
+    "rs485",
+    "mqtt",
+    "home-assistant"
+  ],
   "author": {
     "name": "Fredrik Anerdin"
   },
-  "bundleDependencies": false,
+  "license": "MIT",
+  "main": "index.js",
+  "scripts": {
+    "start": "node gateway.js",
+    "gateway": "node gateway.js",
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "mqtt": "^5.15.2",
     "serialport": "^13.0.0"
   },
-  "deprecated": false,
-  "description": "RS485 connection to a Nibe Heatpump with full communication supports",
-  "keywords": [
-    "nibepi",
-    "nibe"
-  ],
-  "license": "MIT",
-  "main": "index.js",
-  "name": "nibepi",
-  "scripts": {
-    "start": "node index.js",
-    "gateway": "node gateway.js",
-    "test": "node --test test/*.test.js"
-  },
-  "version": "2.0.0",
   "engines": {
     "node": ">=20"
   }
