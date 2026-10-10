@@ -862,46 +862,58 @@ async function reqData (address) {
 }
 
 
+// Waits up to SET_WAIT_MS for a running core (and, on F-series, a known
+// model), then sends. cb is always called exactly once: cb(null,ack) when the
+// core reports the write, cb(err) on rejection, timeout or no ACK. The two
+// string errors are kept as they were for existing callers.
+const SET_WAIT_MS = 30000;
+const SET_ACK_MS = 60000;
 const setData = (address,value,cb=()=>{}) => {
+    if(typeof cb!=='function') cb = ()=>{};
     console.log(`Setting data in register ${address}: ${value}`)
-    var output = setDataValue({register:address,value:value})
-    if(output===-1) {
-        let err = ('Register dont exist')
-        return cb(err);
-    } else if(output===-2) {
-        let err = ('Register not writeable');
-        return cb(err);
-    }
-    if(core!==undefined && core.connected!==undefined && core.connected===true) {
-        if(output!==undefined) {
-            nibeEmit.once("ACK_"+address,(result) => {
-                cb(null,result);
-            })
-            if(address.toString().charAt(0)=="1") {
-                core.send({type:"rmuSet",data:output});
-            } else {
-                core.send({type:"setData",data:output});
-                reqData(address).catch(logCatch)
-            }
-            
+    let done = false;
+    let waitTimer;
+    let ackTimer;
+    let ackListener;
+    const finish = (err,result) => {
+        if(done===true) return;
+        done = true;
+        clearTimeout(waitTimer);
+        clearTimeout(ackTimer);
+        if(ackListener!==undefined) nibeEmit.removeListener("ACK_"+address,ackListener);
+        if(err) return cb(err);
+        cb(null,result);
+    };
+    const coreUp = () => (core!==undefined && core.connected===true);
+    const ready = () => coreUp() && (config.connection===undefined || config.connection.series!=="fSeries" || model.length!==0);
+    const send = () => {
+        var output = setDataValue({register:address,value:value});
+        if(output===-1) return finish('Register dont exist');
+        if(output===-2) return finish('Register not writeable');
+        if(output===-3) return finish(new Error('Value ('+value+') out of range for register '+address));
+        if(output===-4) return finish(new Error('Invalid value ('+value+') for register '+address));
+        if(output===undefined) return finish(new Error('Configuration is invalid'));
+        ackListener = (result) => { finish(null,result); };
+        nibeEmit.once("ACK_"+address,ackListener);
+        ackTimer = setTimeout(() => {
+            finish(new Error('No ACK when writing register '+address));
+        }, SET_ACK_MS);
+        if(address.toString().charAt(0)=="1") {
+            core.send({type:"rmuSet",data:output});
+        } else {
+            core.send({type:"setData",data:output});
+            reqData(address).catch(logCatch)
         }
-    } else {
-        setTimeout((data,address) => {
-            if(core!==undefined && core.connected!==undefined && core.connected===true) {
-                if(data!==undefined) {
-                    nibeEmit.once("ACK_"+address,(result) => {
-                        cb(null,result);
-                    })
-                    if(address.toString().charAt(0)=="1") {
-                        core.send({type:"rmuSet",data:data});
-                    } else {
-                        core.send({type:"setData",data:data});
-                        reqData(address).catch(logCatch)
-                    }
-                }
-            }
-        }, 5000, output,address);
-    }
+    };
+    const started = Date.now();
+    const attempt = () => {
+        if(ready()) return send();
+        if(Date.now()-started>=SET_WAIT_MS) {
+            return finish(new Error(coreUp() ? 'Heatpump is not ready yet.' : 'Core is not started.'));
+        }
+        waitTimer = setTimeout(attempt, 1000);
+    };
+    attempt();
 }
 function getData(address) {
     var item = register.find(item => item.register == address);
@@ -929,6 +941,22 @@ function getData(address) {
         return;
     }
 }
+// Raw value range per register size; "any" for registers without a size.
+const sizeRange = {
+    s8:[-128,127], u8:[0,255],
+    s16:[-32768,32767], u16:[0,65535],
+    s32:[-2147483648,2147483647], u32:[0,4294967295],
+    any:[-2147483648,4294967295]
+};
+// Number from a write request: numbers, numeric strings ("21.5", "21,5",
+// " 3 ") and Buffers (MQTT). Anything else, and empty strings, give NaN.
+const parseWriteValue = (value) => {
+    if(Buffer.isBuffer(value)) value = value.toString();
+    if(typeof value!=='number' && typeof value!=='string') return NaN;
+    let text = String(value).trim().replace(',','.');
+    if(text==='') return NaN;
+    return Number(text);
+}
 function setDataValue(incoming) {
     var item = register.find(item => item.register == incoming.register);
     if(item!==undefined) {
@@ -938,22 +966,30 @@ function setDataValue(incoming) {
             var min = Number(item.min);
             var max = Number(item.max);
             var corruptData;
-            incoming.value = incoming.value*item.factor;
-            if(min!==undefined && max!==undefined) {
-                if(min!==0 || max!==0) {
-                    if(incoming.value>max) {
-                        incoming.value = max
-                        corruptData = true;
-                        nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+incoming.value/item.factor+') utanför giltigt värde som får skickas.'});
-                        log(config.log.enable,'Data ('+incoming.value/item.factor+') out of range, to register '+incoming.register,config.log['error'],"Data");
-                    } else if(incoming.value<min) {
-                        incoming.value = min;
-                        corruptData = true;
-                        nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+incoming.value/item.factor+') utanför giltigt värde som får skickas.'});
-                        log(config.log.enable,'Data ('+incoming.value/item.factor+') out of range, to register '+incoming.register,config.log['error'],"Data");
-                    }
-                }
+            // "abc", "", undefined or a Buffer used to become NaN or 0 here, and
+            // NaN passed the range checks and was written as 0.
+            let value = parseWriteValue(incoming.value);
+            let factor = Number(item.factor);
+            if(!Number.isFinite(value) || !Number.isFinite(factor) || factor===0) {
+                nibeEmit.emit('fault',{from:"Skicka värde",message:'Ogiltigt värde ('+incoming.value+') till register '+incoming.register+', skickas inte.'});
+                log(config.log.enable,'Invalid value ('+incoming.value+') to register '+incoming.register+', not sent',config.log['error'],"Data");
+                return -4;
             }
+            let raw = Math.round(value*factor);
+            // Always within what the register size can hold, and within the
+            // model's min/max unless both are 0. Out of range is rejected, not
+            // clamped: a clamped value is still a value nobody asked for.
+            let range = sizeRange[item.size] || sizeRange.any;
+            let outside = (raw<range[0] || raw>range[1]);
+            if(min!==0 || max!==0) {
+                if(raw>max || raw<min) outside = true;
+            }
+            if(outside===true) {
+                nibeEmit.emit('fault',{from:"Skicka värde",message:'Data ('+value+') utanför giltigt värde som får skickas.'});
+                log(config.log.enable,'Data ('+value+') out of range, to register '+incoming.register,config.log['error'],"Data");
+                return -3;
+            }
+            incoming.value = raw;
             if(config.connection.enable!==undefined && (config.connection.enable=="serial" || config.connection.enable=="nibegw")) {
                 if(item.register.charAt(0)=="1") {
                     let len = 0x03;
@@ -1681,7 +1717,7 @@ const handleMQTT = (on,host,port,user,pass,cb) => {
                             publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
                         }
                     } else if(topic.includes('set')) {
-                        setData(topic[0],message,(err,result) => {
+                        setData(topic[0],message.toString(),(err,result) => {
                             if(err) return console.log(err);
                         });
                     } else if(topic.includes('get')) {
