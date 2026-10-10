@@ -274,7 +274,6 @@ const saveGraph = (data) => {
         return 'Graferna sparade till SD-kort';
     });
 }
-let startingMQTT = false;
 const updateConfig = (data) => {
     // A partial or non-object config used to replace the settings and then
     // throw below; ignore it instead.
@@ -1559,28 +1558,51 @@ function startMQTT(host,port,user,pass) {
     };
     if(mqtt_username!==undefined) mqtt_Options.username = mqtt_username
     if(mqtt_password!==undefined) mqtt_Options.password = mqtt_password
-    mqtt_client = mqtt.connect('mqtt://' + mqtt_host, mqtt_Options);
-    
-    mqtt_client.on('connect', function () {
+    // One client per set of settings, kept for the process lifetime: mqtt.js
+    // reconnects by itself (reconnectPeriod) and resubscribes on reconnect.
+    const client = mqtt.connect('mqtt://' + mqtt_host, mqtt_Options);
+    mqtt_client = client;
+    let firstConnect = true;
+    client.on('connect', function () {
+        if(client!==mqtt_client) return;
+        mqttErrorShown = false;
         nibeEmit.emit('fault',{from:"MQTT",message:'MQTT Brokern är ansluten'});
         console.log("MQTT Broker is connected.")
-        mqtt_client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
-        mqtt_client.subscribe('homeassistant/status');
+        client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
+        client.subscribe('homeassistant/status');
+        client.subscribe(config.mqtt.topic+'#');
         cleanOldDiscovery();
         scheduleDiscovery();
-        resolve(mqtt_client);
+        if(firstConnect===true) {
+            firstConnect = false;
+            config.mqtt.host = host;
+            config.mqtt.port = port;
+            config.mqtt.enable = true;
+            updateSensors(config);
+        }
+        resolve(client);
     });
-    mqtt_client.on('close',function(err){
-        if (mqtt_client.reconnecting === false) {
+    client.on('close',function(err){
+        if (client.reconnecting === false) {
             nibeEmit.emit('fault',{from:"MQTT",message:'MQTT Brokern är frånkopplad'});
         }
         console.log("MQTT Broker is disconnected")
     });
-    mqtt_client.on('error',function(error){
-        nibeEmit.emit('fault',{from:"MQTT",message:'Kunde inte ansluta till MQTT Brokern'});
-        console.log("Could not connect to MQTT broker")
-        reject(mqtt_client);
+    // Not ended on error: the broker may simply start after Node-RED, and the
+    // client keeps retrying. Reported once until the next successful connect.
+    client.on('error',function(error){
+        if(client===mqtt_client && mqttErrorShown===false) {
+            mqttErrorShown = true;
+            nibeEmit.emit('fault',{from:"MQTT",message:'Kunde inte ansluta till MQTT Brokern'});
+            console.log("Could not connect to MQTT broker: "+(error && error.message ? error.message : error))
+        }
+        reject(error);
       });
+    // Registered once per client, so each message is handled once.
+    client.on('message', function (topic, message) {
+        if(client!==mqtt_client) return;
+        onMQTTMessage(topic, message);
+    });
 })
 }
 //
@@ -1702,110 +1724,113 @@ function clearOldDiscovery(topic,message) {
         }
     } catch(e) {}
 }
-const handleMQTT = (on,host,port,user,pass,cb) => {
+// Incoming MQTT messages: Home Assistant status, old discovery objects,
+// subscribed sensors and <topic><register>/set|get|add|remove.
+function onMQTTMessage(topic, message) {
+    if(topic==='homeassistant/status') {
+        if(message.toString()==='online') scheduleDiscovery();
+        return;
+    }
+    if(topic.startsWith('homeassistant/sensor/')) {
+        clearOldDiscovery(topic,message);
+        return;
+    }
+    let subTopic = config.mqtt.topic;
+    let subscribed = false;
+    for (const arr of mqtt_subcribers) {
+        if(topic===arr) {
+            let save = topic.replace(/\//g,"_");
+            let messageString = message.toString().replace(/\,/g,".");
+            if(mqttData[save]===undefined) mqttData[save] = {};
+            mqttData[save].data = Number(messageString);
+            mqttData[save].raw_data = Number(messageString);
+            mqttData[save].register = save;
+            mqttData[save].timestamp = Date.now();
+            nibeEmit.emit('mqttData',mqttData[save]);
+            subscribed = true;
+        }
+    }
+    if(subscribed===false && topic.includes(subTopic)) {
+        topic = topic.replace(config.mqtt.topic,'')
+        topic = topic.split('/');
+        if(topic[0]=="adjust_s1") {
+            if(topic.includes('set')) {
+                // Stored as a number: a Buffer here broke Number(adjust_s1) later.
+                let value = parseWriteValue(message);
+                if(Number.isFinite(value)) {
+                    if(config.home===undefined) config.home = {};
+                    config.home.adjust_s1 = value;
+                    updateConfig(config);
+                    publishMQTT(config.mqtt.topic+"adjust_s1",config.home.adjust_s1)
+                }
+            } else if(topic.includes('get')) {
+                if(config.home!==undefined) publishMQTT(config.mqtt.topic+"adjust_s1",config.home.adjust_s1)
+            }
+        } else if(topic[0]=="adjust_s2") {
+            if(topic.includes('set')) {
+                // Stored as a number: a Buffer here broke Number(adjust_s2) later.
+                let value = parseWriteValue(message);
+                if(Number.isFinite(value)) {
+                    if(config.home===undefined) config.home = {};
+                    config.home.adjust_s2 = value;
+                    updateConfig(config);
+                    publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
+                }
+            } else if(topic.includes('get')) {
+                if(config.home!==undefined) publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
+            }
+        } else if(topic.includes('set')) {
+            setData(topic[0],message.toString(),(err,result) => {
+                if(err) return console.log(err);
+            });
+        } else if(topic.includes('get')) {
+            reqData(topic[0]).catch(logCatch);
+        } else if(topic.includes('add')) {
+            addRegister(topic[0])
+        } else if(topic.includes('remove')) {
+            removeRegister(topic[0])
+        }
+    }
+}
+let mqttKey;               // settings mqtt_client was created with
+let mqttErrorShown = false;
+// Called on every config update. Creates the client once and replaces it
+// (ending the old one first) only when the broker settings or topic change.
+// Before, every update while the broker was down created another client
+// without ending the old one, and after the outage each of them handled
+// every .../set message.
+const handleMQTT = (on,host,port,user,pass,cb=()=>{}) => {
     if(on===undefined || on=="" || on=="false" || on===false) {
-        startingMQTT = false;
         if(mqtt_client!==undefined) {
             mqtt_client.end();
+            mqtt_client = undefined;
+            mqttKey = undefined;
             console.log('Terminated MQTT session, shutdown');
         }
         return cb(null,false)
     };
     if(host===undefined || host=="") return cb(err = new Error('No MQTT host defined'));
     if(port===undefined || port=="") return cb(err = new Error('No MQTT port defined'));
-    if(mqtt_client===undefined || mqtt_client.connected!==true) {
-        console.log('Startar MQTT')
-        if(startingMQTT===false) {
-            startingMQTT = true;
-    startMQTT(host,port,user,pass).then(result => {
-        startingMQTT = false
-        //mqtt_client = result;
-        config.mqtt.host = host;
-        config.mqtt.port = port;
-        config.mqtt.enable = true;
-        result.subscribe(config.mqtt.topic+'#');
-        updateSensors(config);
-        if(mqtt_client!==undefined && mqtt_client.connected===true) {
-            mqtt_client.on('message', function (topic, message) {
-                if(topic==='homeassistant/status') {
-                    if(message.toString()==='online') scheduleDiscovery();
-                    return;
-                }
-                if(topic.startsWith('homeassistant/sensor/')) {
-                    clearOldDiscovery(topic,message);
-                    return;
-                }
-                let subTopic = config.mqtt.topic;
-                let subscribed = false;
-                for (const arr of mqtt_subcribers) {
-                    if(topic===arr) {
-                        let save = topic.replace(/\//g,"_");
-                        let messageString = message.toString().replace(/\,/g,".");
-                        if(mqttData[save]===undefined) mqttData[save] = {};
-                        mqttData[save].data = Number(messageString);
-                        mqttData[save].raw_data = Number(messageString);
-                        mqttData[save].register = save;
-                        mqttData[save].timestamp = Date.now();
-                        nibeEmit.emit('mqttData',mqttData[save]);
-                        subscribed = true;
-                    }
-                }
-                if(subscribed===false && topic.includes(subTopic)) {
-                    topic = topic.replace(config.mqtt.topic,'')
-                    topic = topic.split('/');
-                    if(topic[0]=="adjust_s1") {
-                        if(topic.includes('set')) {
-                            if(!isNaN(message)) {
-                                if(config.home!==undefined) config.home.adjust_s1 = message
-                                updateConfig(config);
-                                publishMQTT(config.mqtt.topic+"adjust_s1",config.home.adjust_s1)
-                            }
-                        } else if(topic.includes('get')) {
-                            publishMQTT(config.mqtt.topic+"adjust_s1",config.home.adjust_s1)
-                        }
-                    } else if(topic[0]=="adjust_s2") {
-                        if(topic.includes('set')) {
-                            if(!isNaN(message)) {
-                                if(config.home!==undefined) config.home.adjust_s2 = message
-                                updateConfig(config);
-                                publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
-                            }
-                        } else if(topic.includes('get')) {
-                            publishMQTT(config.mqtt.topic+"adjust_s2",config.home.adjust_s2)
-                        }
-                    } else if(topic.includes('set')) {
-                        setData(topic[0],message.toString(),(err,result) => {
-                            if(err) return console.log(err);
-                        });
-                    } else if(topic.includes('get')) {
-                        reqData(topic[0]).catch(logCatch);
-                    } else if(topic.includes('add')) {
-                        addRegister(topic[0])
-                    } else if(topic.includes('remove')) {
-                        removeRegister(topic[0])
-                    }
-                }
-                //console.log('Incoming MQTT message:', topic, message.toString());
-            });
-        }
+    const key = JSON.stringify([String(host),String(port),user||'',pass||'',config.mqtt.topic]);
+    if(mqtt_client!==undefined && key===mqttKey) {
+        return cb(null,mqtt_client.connected===true);
+    }
+    if(mqtt_client!==undefined) {
+        console.log('MQTT settings changed, reconnecting');
+        mqtt_client.end();
+        mqtt_client = undefined;
+    }
+    console.log('Startar MQTT')
+    mqttKey = key;
+    mqttErrorShown = false;
+    startMQTT(host,port,user,pass).then(() => {
         cb(null,true);
-    }).catch((reject => {
-        startingMQTT = false
-        console.log(reject)
-        if(mqtt_client!==undefined) {
-            mqtt_client.end();
-        }
-        startingMQTT = false;
-        console.log('Terminated MQTT session');
-        return cb(null,false)
-    }));
-}
-} else {
-    return cb(null,true)
-}
-
+    }, () => {
+        cb(null,false);
+    });
 }
 const publishMQTT = (topic,message,retain=false) => {
+    if(message===undefined || message===null) return;
     if(mqtt_client!==undefined) {
         if(mqtt_client.connected===true && mqtt_client.disconnecting!==true) {
             mqtt_client.publish(topic, message.toString(),{retain:retain});
@@ -1815,6 +1840,7 @@ const publishMQTT = (topic,message,retain=false) => {
 }
 const publishMQTTpromise = (topic,message,retain=false) => {
     const promise = new Promise((resolve,reject) => {
+    if(message===undefined || message===null) return reject(false);
     if(mqtt_client!==undefined) {
         if(mqtt_client.connected===true && mqtt_client.disconnecting!==true) {
             mqtt_client.publish(topic, message.toString(),{retain:retain});
@@ -1866,16 +1892,19 @@ const addSensor = (data) => {
     updateSensors(data);
 }
 const removeSensor = (data) => {
+    if(data===undefined || data===null || config.home===undefined) return;
     if(config.home.inside_sensors!==undefined) {
         let i = config.home.inside_sensors.findIndex(i => i.register == data.register);
         if(i!==-1) {
             config.home.inside_sensors.splice(i,1);
-            i = mqtt_subcribers.findIndex(i => i == data);
-            mqtt_subcribers.splice(i,1);
-            let mqttRemove = data.register.replace(/\//g,"_");
+            // Compared with the topic: comparing with the sensor object never
+            // matched, and splice(-1,1) then removed the last subscriber.
+            i = mqtt_subcribers.findIndex(i => i == data.register);
+            if(i!==-1) mqtt_subcribers.splice(i,1);
+            let mqttRemove = String(data.register).replace(/\//g,"_");
             delete mqttData[mqttRemove];
             updateConfig(config);
-            mqtt_client.unsubscribe(data.register);
+            if(mqtt_client!==undefined) mqtt_client.unsubscribe(data.register);
             nibeEmit.emit('updateSensor',true);
         }
     }
