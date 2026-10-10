@@ -26,7 +26,7 @@ const Core = require(__dirname+'/lib/startCore')
 const startCore = Core.startCoreF;
 const startCoreS = Core.startCoreS;
 const startNibeGW = Core.startNibeGW;
-const stopCore = require(__dirname+'/lib/stopCore');
+const stopCoreProcess = require(__dirname+'/lib/stopCore');
 var log = require('./log');
 var child = require('child_process');
 var docker = false;
@@ -298,6 +298,28 @@ const updateConfig = (data) => {
 }
 
 let core;
+// Core supervision. index.js tracks the core it forked: an unexpected exit is
+// reported and the core is forked again with backoff (2 s doubling to 60 s,
+// back to 2 s after 10 minutes up). stopCore() marks a stop as intended, so
+// port or series changes from Node-RED do not trigger a restart.
+const RESTART_MIN_MS = 2000;
+const RESTART_MAX_MS = 60000;
+const RESTART_STABLE_MS = 600000;
+const BUS_SILENT_MINUTES = 5;
+let coreState = 'down';    // 'starting' | 'up' | 'down'
+let coreGen = 0;           // bumped by every fork and stop; stale callbacks compare against it
+let coreWanted = false;    // initiateCore called and not stopped since
+let coreArgs;              // {host,port,cb} from the last initiateCore
+let restartDelay = RESTART_MIN_MS;
+let restartTimer;
+let stableTimer;
+let restartCount = 0;
+let lastData = null;
+let busSilentMinutes = 0;
+const markData = () => {
+    lastData = Date.now();
+    if(coreState==='starting') coreState = 'up';
+};
 const reportedMissing = new Set();
 // RS485 bus health per minute: frame counts from the core (backend.js) plus
 // reads that timed out here. Emitted as 'busHealth', published to MQTT as
@@ -322,13 +344,83 @@ const onBusStats = (stats) => {
         console.log(text);
         if(config!==undefined && config.log!==undefined) log(config.log.enable,text,config.log['info'],"Bus");
     }
+    // Bus watchdog: a running core that decodes no valid frame for several
+    // minutes has most likely lost the serial port without noticing.
+    if(stats.ok===0 && core!==undefined && core.connected===true) {
+        busSilentMinutes++;
+        if(busSilentMinutes>=BUS_SILENT_MINUTES) {
+            busSilentMinutes = 0;
+            restartCore(`Ingen data från värmepumpen på ${BUS_SILENT_MINUTES} minuter, startar om kärnan`);
+        }
+    } else {
+        busSilentMinutes = 0;
+    }
 };
 const getBusHealth = () => busHealth;
+const getHealth = () => {
+    return {core:coreState, model:model, lastData:lastData, restarts:restartCount, busHealth:busHealth};
+}
 const resetCore = () => {
     model = "";
     reportedMissing.clear();
     register = [];
     firmware = "";
+    // A new core starts with an empty poll list; regQueue must be empty too,
+    // or decodeMessage never registers the regular registers with it again.
+    regQueue.length = 0;
+    rmu = {};
+    announcedModel = undefined;
+}
+// Kill the running core on purpose (watchdog); the exit handler restarts it.
+const restartCore = (message) => {
+    const child = core;
+    const gen = coreGen;
+    console.log(message);
+    if(config!==undefined && config.log!==undefined) log(config.log.enable,message,config.log['error'],"Core");
+    nibeEmit.emit('fault',{from:"core",message:message});
+    // A 'fault' listener may already have stopped and restarted the core.
+    if(gen!==coreGen || child===undefined || child.exitCode!==null || child.signalCode!==null) return;
+    child.restartReason = message;
+    child.kill('SIGTERM');
+}
+const superviseCore = (child,gen) => {
+    // Without a listener a failed send to a dead core would throw in Node-RED.
+    child.on('error', (err) => {
+        console.log('Core process error: '+err.message);
+    });
+    child.once('exit', (code,signal) => {
+        if(gen!==coreGen || coreWanted!==true) return; // stopped on purpose
+        clearTimeout(stableTimer);
+        coreState = 'down';
+        restartCount++;
+        const delay = restartDelay;
+        restartDelay = Math.min(restartDelay*2, RESTART_MAX_MS);
+        const text = `Core exited unexpectedly (code ${code}, signal ${signal}), restarting in ${delay/1000} s`;
+        console.log(text);
+        if(config!==undefined && config.log!==undefined) log(config.log.enable,text,config.log['error'],"Core");
+        resetCore();
+        // Scheduled before the fault is emitted: a 'fault' listener that
+        // restarts the core itself calls stopCore, which cancels this timer.
+        restartTimer = setTimeout(() => {
+            if(gen!==coreGen || coreWanted!==true) return;
+            forkCore();
+        }, delay);
+        if(child.restartReason===undefined) {
+            nibeEmit.emit('fault',{from:"core",message:'Kärnan stoppades oväntat, startar om'});
+        }
+    });
+}
+// Stops the tracked core, plus the one passed in if that is another process.
+// stopCore(nibe.core) from node-red-contrib-nibepi keeps working, and
+// stopCore() with no argument stops the tracked core.
+const stopCore = (child) => {
+    coreWanted = false;
+    coreGen++;
+    clearTimeout(restartTimer);
+    clearTimeout(stableTimer);
+    coreState = 'down';
+    if(child!==undefined && child!==core) stopCoreProcess(child);
+    return stopCoreProcess(core);
 }
 const initiateCore = (host,port,cb) => {
     if(config.log===undefined) config.log = {};
@@ -354,19 +446,56 @@ const initiateCore = (host,port,cb) => {
             })
         }
     }
+    coreArgs = {host:host,port:port,cb:cb};
+    coreWanted = true;
+    clearTimeout(restartTimer);
+    forkCore();
+}
+// Forks the core for the current config, from initiateCore and on restarts.
+const forkCore = () => {
+    const host = coreArgs.host;
+    const port = coreArgs.port;
+    const cb = coreArgs.cb;
+    // Never two cores on one serial port.
+    if(core!==undefined && core.connected===true) stopCoreProcess(core);
+    const gen = ++coreGen;
+    coreState = 'starting';
+    busSilentMinutes = 0;
+    clearTimeout(stableTimer);
+    // Take over a freshly forked core, unless it was stopped or superseded
+    // during the fork delay in lib/startCore.
+    const adopt = (child) => {
+        if(gen!==coreGen || coreWanted!==true) {
+            stopCoreProcess(child);
+            return false;
+        }
+        core = child;
+        superviseCore(child,gen);
+        stableTimer = setTimeout(() => { restartDelay = RESTART_MIN_MS; }, RESTART_STABLE_MS);
+        return true;
+    };
+    // Messages still in flight from a core that has been stopped or replaced
+    // are dropped.
+    const fromCore = (handler) => (m) => {
+        if(gen!==coreGen) return;
+        handler(m);
+    };
+    let forked = false;
 
 if(config.connection!==undefined && config.connection.series!==undefined) {
     if(config.connection.series=="fSeries") {
         if(config.connection.enable=="serial") {
+            forked = true;
             startCore(port).then(result => {
-                core = result;
+                if(adopt(result)===false) return;
                 if(config.system!==undefined && config.system.rmu_emulation===false) {
                     console.log('RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
                     core.send({type:"rmuEmulation",data:false});
                 }
                 
-                core.on('message', (m) => {
+                core.on('message', fromCore((m) => {
                     if(m.type=="data") {
+                        markData();
                         let n = m.data;
                         announcment(m, (err,ready) => {
                             if(err) console.log(err);
@@ -392,14 +521,16 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                         }
                         log(config.log.enable,m.data,config.log[m.level],m.kind);
                     }
-                  });
+                  }));
             });
         } else if(config.connection.enable=="nibegw") {
+            forked = true;
             startNibeGW(port).then(result => {
-                core = result;
+                if(adopt(result)===false) return;
                 
-                core.on('message', (m) => {
+                core.on('message', fromCore((m) => {
                     if(m.type=="data") {
+                        markData();
                         let n = m.data;
                         announcment(m, (err,ready) => {
                             if(err) console.log(err);
@@ -422,15 +553,17 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                         }
                         log(config.log.enable,m.data,config.log[m.level],m.kind);
                     }
-                  });
+                  }));
             });
         }
         
     } else if(config.connection.series=="sSeries") {
+                    forked = true;
                     startCoreS(host,port).then(result => {
-                        core = result;
-                        core.on('message', (m) => {
+                        if(adopt(result)===false) return;
+                        core.on('message', fromCore((m) => {
                             if(m.type=="started") {
+                                if(coreState==='starting') coreState = 'up';
                                 let data = m.data;
                                 if(config.tcp!==undefined && config.tcp.pump!==undefined) {
                                     let reg = require(`./models/${config.tcp.pump}.json`);
@@ -460,6 +593,7 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                                 }
                                 // Process message
                             } else if(m.type=="data") {
+                                markData();
                                 let data = m.data;
                                 decodeS(data);
                             } else if(m.type=="ack") {
@@ -473,11 +607,11 @@ if(config.connection!==undefined && config.connection.series!==undefined) {
                                 }
                                 log(config.log.enable,m.data,config.log[m.level],m.kind);
                             }
-                          });
+                          }));
                     });
     }
 }
-    
+    if(forked===false) coreState = 'down';
 }
 
 
@@ -1602,7 +1736,7 @@ const publishMQTTpromise = (topic,message,retain=false) => {
 return promise;
 }
 const redOn = (enable=true) => {
-    core.send({type:"red",data:enable});
+    if(core!==undefined && core.connected===true) core.send({type:"red",data:enable});
 }
 const updateSensors = (config) => {
     if(config.home===undefined) {
@@ -1700,6 +1834,7 @@ module.exports = {
     setConfig:updateConfig,
     getRegister:getRegister,
     getBusHealth:getBusHealth,
+    getHealth:getHealth,
     handleMQTT:handleMQTT,
     redOn:redOn,
     addSensor: addSensor,
