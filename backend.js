@@ -123,30 +123,52 @@ process.on('message', (m) => {
         }
     }
   });
+  // Always exit when the parent goes away. The 'red' flag used to keep a
+  // detached core running here, holding the serial port, after Node-RED died.
   process.on('disconnect', (m) => {
-      if(red===false) {
-        console.log('Shutting down the core.')
-        process.exit(99);
-      }
-    
+      console.log('Shutting down the core.')
+      process.exit(99);
   });
 
 
+let portOpened = false;
+let shuttingDown = false;
+// Lost serial port: report it and exit non-zero, so index.js restarts the
+// core. Exit once the fault has been handed to the IPC channel (or after a
+// second), otherwise the message could be lost with the process.
+function shutDown(message) {
+    if(shuttingDown===true) return;
+    shuttingDown = true;
+    console.log('Error in the core, shutting it down: '+message);
+    if(myPort!==undefined) {
+        myPort.removeAllListeners();
+        myPort.on('error', () => {});
+    }
+    const exit = () => process.exit(1);
+    setTimeout(exit, 1000);
+    if(process.connected===true) {
+        try {
+            process.send({type:"fault",data:{from:"core",message:message}}, exit);
+        } catch(e) {
+            setImmediate(exit);
+        }
+    } else {
+        setImmediate(exit);
+    }
+}
 function showPortOpen() {
+    portOpened = true;
     //console.log(`Core started on serial port ${portName}`);
 }
 function showPortClose() {
-    console.log('Port closed. Data rate: ' + myPort.baudRate);
+    shutDown('The serial port was closed unexpectedly');
 }
 function showError(error) {
-    if(process.connected===true) {
-        process.send({type:"fault",data:{from:"core",message:"The core could not be started, check the serialport"}});
-    }
-    myPort.removeAllListeners();
-    if(process.connected===true) {
-        process.disconnect();
-        console.log('Error in the core, shuting it down.')
-        process.exit(99);
+    let reason = (error && error.message) ? ': '+error.message : '';
+    if(portOpened===true) {
+        shutDown('Serial port error'+reason);
+    } else {
+        shutDown('The core could not be started, check the serialport'+reason);
     }
 }
 

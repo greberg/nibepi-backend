@@ -62,13 +62,61 @@ process.on('message', (m) => {
         red = m.data;
     }
   });
+  // Always exit when the parent goes away, as in backend.js.
   process.on('disconnect', (m) => {
-      if(red===false) {
-        console.log('Shutting down the core.')
-        process.exit(99);
-      }
-    
+      console.log('Shutting down the core.')
+      process.exit(99);
   });
+let shuttingDown = false;
+// Socket error: report it and exit non-zero so index.js restarts the core.
+// Exit once the fault is handed to the IPC channel, or after a second.
+function shutDown(message) {
+    if(shuttingDown===true) return;
+    shuttingDown = true;
+    console.log('Error in the core, shutting it down: '+message);
+    const exit = () => process.exit(1);
+    setTimeout(exit, 1000);
+    if(process.connected===true) {
+        try {
+            process.send({type:"fault",data:{from:"core",message:message}}, exit);
+        } catch(e) {
+            setImmediate(exit);
+        }
+    } else {
+        setImmediate(exit);
+    }
+}
+// Only frames from the configured gateway are answered. HOST may be a host
+// name, so accept every address it resolves to (refreshed periodically).
+const net = require('net');
+const dns = require('dns');
+let gatewayAddresses = new Set();
+const droppedFrom = new Set();
+function resolveGateway() {
+    if(net.isIP(HOST)!==0) {
+        gatewayAddresses = new Set([HOST]);
+        return;
+    }
+    dns.lookup(HOST, {all:true, family:4}, (err, addresses) => {
+        if(err) {
+            if(process.connected===true) {
+                process.send({type:"log",data:'Could not resolve NibeGW host '+HOST+': '+err.message,level:"error",kind:"NibeGW"});
+            }
+            return;
+        }
+        gatewayAddresses = new Set(addresses.map(a => a.address));
+    });
+}
+// Same checksum test as checkMessage in backend.js.
+function validFrame(data) {
+    if(data.length<6 || data.length<data[4]+6) return false;
+    let msgChecksum = data[data[4]+5];
+    let calcChecksum = 0;
+    for(let i = 2; i < (data[4] + 5); i++) {
+        calcChecksum ^= data[i];
+    }
+    return (msgChecksum==calcChecksum) || (msgChecksum==0xC5 && calcChecksum==0x5C);
+}
 //start()
 // Gateways track a reply target per source ip:port. Opening a fresh socket
 // for every request gives each one a new ephemeral source port, so the
@@ -91,12 +139,33 @@ function read(data) {
     send(data, 10000);
 }
 function start() {
+    server.on('error', function(err) {
+        shutDown('NibeGW socket error: '+err.message);
+    });
+    resolveGateway();
+    setInterval(resolveGateway, 600000);
     server.bind(PORT, "0.0.0.0");
     server.on('listening', function() {
         var address = server.address();
        console.log('NibeGW client is listening on ' + HOST + ':' + address.port);
       });      
     server.on('message', function(message, remote) {
+        if(!gatewayAddresses.has(remote.address)) {
+            if(gatewayAddresses.size===0) return;
+            if(!droppedFrom.has(remote.address)) {
+                droppedFrom.add(remote.address);
+                if(process.connected===true) {
+                    process.send({type:"log",data:'Ignoring UDP packets from '+remote.address+', not the NibeGW host '+HOST,level:"error",kind:"NibeGW"});
+                }
+            }
+            return;
+        }
+        if(!validFrame(message)) {
+            if(process.connected===true) {
+                process.send({type:"log",data:Array.from(message),level:"error",kind:"CHKSUM"});
+            }
+            return;
+        }
         makeResponse(Buffer.from(message)).then(result => {
                 result = Array.from(result);
                 let doubleFound = false;
