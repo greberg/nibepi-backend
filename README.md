@@ -81,6 +81,42 @@ every config write in `sudo mount -o remount,rw /`. In a container that fails
 and the write is lost silently. It can also be set as `system.docker` in the
 config; the environment variable wins.
 
+## Gateway mode: leases over MQTT
+
+For control logic running elsewhere (a Home Assistant component), registers
+are written through *leases* that fall back by themselves. `T` is
+`mqtt.topic`, by default `nibe/modbus/`.
+
+| topic | direction | payload |
+|---|---|---|
+| `T lease/<reg>/set` | → gateway | `{"value": -2, "ttl": 900, "owner": "ha"}`, not retained |
+| `T lease/<reg>/release` | → gateway | anything, not retained |
+| `T lease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, owner, error` |
+| `T gateway/state` | gateway →, retained, per minute | `version, leases, raw_set, core, lastData` |
+
+- Only registers in the lease table can be leased: curve offsets 47011/47010
+  (-10..10, restore to `home.adjust_s1`/`_s2`), 47041, 47134, 48132, and the
+  cut-off frequency registers 48659–48664. `gateway.leases` in the config
+  overrides entries (`{"<reg>": {"min", "max", "neutral", "min_interval"}}`,
+  `null` removes one).
+- The first request reads the current value from the pump as the baseline
+  and persists it. The value is written when it changes, at most once per
+  `min_interval` (the last value wins). `ttl` is clamped to 60..3600 s.
+- Without renewal the lease expires and the register is restored to its
+  neutral value, or else to the baseline; release does the same at once. A
+  failed restore is retried with backoff.
+- While leased, every other writer is refused: plain `T<reg>/set` and
+  Node-RED (`setData` gets `Register <reg> is leased by <owner>`).
+- `gateway.raw_set` limits plain `T<reg>/set`: `"all"` (default), `"none"`,
+  or a list of registers.
+- After a restart, a persisted baseline starts a grace lease of 900 s: renew
+  within it, or the register is restored.
+
+`node gateway.js` (`npm run gateway`) runs the backend without Node-RED:
+core, MQTT, leases and `/dev/shm/nibepi-health.json`, logging to stdout. It
+uses the same `/etc/nibepi/config.json`. Stopping it does not release
+leases; the grace lease covers the restart.
+
 ## Enabling Modbus in the pump
 
 Nothing works until the pump is told to talk. On the pump's own display:
