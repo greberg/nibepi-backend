@@ -24,6 +24,7 @@ The gateway does the following:
 - runs a bus watchdog that restarts a core that gets no frames for 5 minutes
 - publishes bus health once a minute
 - publishes a health file for the Docker `HEALTHCHECK`
+- serves a read-only status page on the LAN (`NIBEPI_UI_PORT`)
 - can publish Home Assistant MQTT discovery for the polled registers
 - applies leases and a raw `/set` policy
 
@@ -97,6 +98,9 @@ with an error.
 | `NIBEPI_LOG_LEVEL` | `error`, `warn`, `info`, `debug`, `trace` (raw bus frames) | `info` |
 | `NIBEPI_LOG_FILE` | also append the log to this file, rotated at 5 MB | (off) |
 | `NIBEPI_HEALTH_FILE` | health file path | `/dev/shm/nibepi-health.json` |
+| `NIBEPI_UI_PORT` | status page port; empty or `0` turns it off (not a config key) | off (`8080` in the Docker image) |
+| `NIBEPI_UI_BIND` | address the status page listens on | `0.0.0.0` |
+| `NIBEPI_UI_USER`, `NIBEPI_UI_PASS` | HTTP Basic auth for the status page; set both or neither | (no auth) |
 
 ### config.json
 
@@ -207,6 +211,45 @@ Every minute the gateway writes `NIBEPI_HEALTH_FILE` (default
 `core` is `starting`, `up` or `down`. A `HEALTHCHECK` can check that `ts` and
 `lastData` are recent. `/dev/shm` does not exist on macOS, so set
 `NIBEPI_HEALTH_FILE` when running there.
+
+## Status page
+
+With `NIBEPI_UI_PORT` set (the Docker image sets `8080`), the gateway serves
+a read-only status page at `http://<pi>:8080/`. It shows the following, and
+refreshes every 5 seconds while the tab is visible:
+
+- **Connection:** core state and restarts, serial port or NibeGW, pump
+  model and firmware, age of the last data from the pump, MQTT broker,
+  topic and user, connect history and last error, and the `raw_set` policy
+- **Bus health:** the last minute, and sparklines of OK frames and errors
+  over the last hour
+- **Virtual RMU40:** per system, whether the pump polls it and whether
+  NibePi answers (`emulated`) or stays silent (`read-only`: another RMU40
+  answers, or `system.rmu_emulation` is `false`), the last pump poll, the
+  room temperature register (10060, ...), the last write to it and its lease
+- **Leases:** every leasable register, with a countdown to expiry
+- **Recent errors and warnings:** kept in memory (the last 200 warnings and
+  errors, and the last 500 lines at info and above), filterable
+- **Key values:** BT1, BT2, BT3, BT6, BT7, BT50, curve offset 47011 and
+  priority 43086, when they are polled
+
+A banner shows when the core is down, MQTT is disconnected, or the pump has
+sent nothing for 10 minutes.
+
+| endpoint | returns |
+|---|---|
+| `GET /` | the page: one file, no external resources, works offline |
+| `GET /api/status` | the snapshot as JSON |
+| `GET /api/log?level=warn&limit=200` | kept log lines, newest first; `level` is `info`, `warn` or `error`, `limit` at most 500 |
+| `GET /healthz` | `200` when the pump has answered in the last 10 minutes (the `HEALTHCHECK` rule), else `503`. No auth. |
+
+The page changes nothing: every endpoint is `GET`. The MQTT and UI
+passwords never appear in it. The status JSON only says whether a password
+is set, and both passwords are masked in every log line (on stdout and in
+the file too). Without `NIBEPI_UI_USER`/`NIBEPI_UI_PASS` anyone who can reach
+the port can read it, so keep it on the LAN and don't forward it to the
+internet. Basic auth over plain HTTP is not encrypted. For access from
+outside, put it behind a VPN or an HTTPS reverse proxy.
 
 ## Connecting to the pump
 
