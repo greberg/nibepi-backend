@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>NibePi gateway</title>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --ink: #16181d; --muted: #5a6170; --line: #dfe2e8;
+  --accent: #2563c9; --good: #157a3c; --good-bg: #e3f4e9; --warn: #8a5a00; --warn-bg: #fdf1d8;
+  --bad: #b3261e; --bad-bg: #fbe4e2; --idle-bg: #eceef2; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --card: #1b1e25; --ink: #e8eaef; --muted: #a2a9b8; --line: #2e333d;
+    --accent: #7aa7f0; --good: #6fd497; --good-bg: #173523; --warn: #f0c060; --warn-bg: #3a2e12;
+    --bad: #ff8a80; --bad-bg: #3d1a18; --idle-bg: #262a33;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+h1 { font-size: 1.35rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0 0 10px; }
+.meta { color: var(--muted); font-size: .85rem; }
+main { max-width: 1200px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+.wide { grid-column: 1 / -1; }
+#banners { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+#banners:empty { display: none; }
+.banner { border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; font-weight: 600; border: 1px solid; }
+.banner.error { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+.banner.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+dt { color: var(--muted); }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .8rem; font-weight: 600; background: var(--idle-bg); color: var(--muted); }
+.pill.good { background: var(--good-bg); color: var(--good); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad, .pill.error { background: var(--bad-bg); color: var(--bad); }
+.good-text { color: var(--good); } .warn-text { color: var(--warn); } .bad-text { color: var(--bad); }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+.nowrap { white-space: nowrap; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.msg { font-family: var(--mono); font-size: .82rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 10px; font-size: .9rem; }
+.controls h2 { margin: 0 auto 0 0; }
+select, input[type=search] { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.tile .label { color: var(--muted); font-size: .8rem; }
+.tile .value { font-size: 1.4rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .age { color: var(--muted); font-size: .75rem; }
+.rmu { border-top: 1px solid var(--line); padding: 10px 0; }
+.rmu:first-of-type { border-top: 0; padding-top: 0; }
+.rmu-head { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.chart { margin-top: 10px; }
+.chart svg { width: 100%; height: 56px; display: block; overflow: visible; }
+.chart .cap { display: flex; justify-content: space-between; font-size: .8rem; color: var(--muted); }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.spark-area { fill: var(--accent); opacity: .12; }
+.spark-bar { fill: var(--bad); }
+.spark-base { stroke: var(--line); stroke-width: 1; }
+.hit { fill: transparent; }
+.hit:hover { fill: var(--ink); opacity: .08; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+footer { max-width: 1200px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: .8rem; }
+a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>NibePi gateway</h1>
+  <span class="meta" id="version"></span>
+  <span class="meta" id="updated" aria-live="polite">Loading...</span>
+</header>
+<div id="banners" role="alert"></div>
+<main>
+  <section class="card" aria-labelledby="h-conn">
+    <h2 id="h-conn">Connection</h2>
+    <dl id="conn"></dl>
+  </section>
+
+  <section class="card" aria-labelledby="h-bus">
+    <h2 id="h-bus">Bus health</h2>
+    <dl id="bus"></dl>
+    <div class="chart">
+      <div class="cap"><span>OK frames per minute, last hour</span><span id="ok-max"></span></div>
+      <svg id="spark-ok" viewBox="0 0 300 56" preserveAspectRatio="none" role="img" aria-label="OK frames per minute over the last hour"></svg>
+    </div>
+    <div class="chart">
+      <div class="cap"><span>Errors per minute (CHKSUM + No respond)</span><span id="err-max"></span></div>
+      <svg id="spark-err" viewBox="0 0 300 56" preserveAspectRatio="none" role="img" aria-label="Bus errors per minute over the last hour"></svg>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-rmu">
+    <h2 id="h-rmu">Virtual RMU40</h2>
+    <div id="rmu"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-values">
+    <h2 id="h-values">Key values</h2>
+    <div class="tiles" id="values"></div>
+  </section>
+
+  <section class="card wide" aria-labelledby="h-leases">
+    <div class="controls">
+      <h2 id="h-leases">Leases</h2>
+      <label><input type="checkbox" id="lease-all"> Show idle registers</label>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Register</th><th scope="col">Name</th><th scope="col">State</th><th scope="col">Value</th><th scope="col">Written</th><th scope="col">Owner</th><th scope="col">Expires in</th><th scope="col">Restores to</th><th scope="col">Error</th></tr></thead>
+        <tbody id="leases"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card wide" aria-labelledby="h-log">
+    <div class="controls">
+      <h2 id="h-log">Recent errors &amp; warnings</h2>
+      <label>Level
+        <select id="log-level">
+          <option value="warn" selected>Warnings and errors</option>
+          <option value="error">Errors only</option>
+          <option value="info">Everything (info and up)</option>
+        </select>
+      </label>
+      <label><span class="sr-only">Filter log lines</span><input type="search" id="log-filter" placeholder="Filter text or area"></label>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Area</th><th scope="col">Message</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<footer>Read-only. Refreshes every 5 s while this tab is visible. <a href="api/status">Status JSON</a> · <a href="api/log?level=warn">Log JSON</a> · <a href="healthz">Health</a></footer>
+<script>
+(function () {
+  'use strict';
+  var REFRESH_MS = 5000;
+  var STALE_S = 600;
+  var status = null;
+  var offset = 0;        // server clock minus ours
+  var timer = null;
+  var logLines = [];
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === 'text') e.textContent = attrs[k];
+      else if (k === 'cls') e.className = attrs[k];
+      else e.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c !== null && c !== undefined) e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return e;
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function pill(text, kind) { return el('span', {cls: 'pill ' + (kind || ''), text: text}); }
+  function dash(v) { return v === null || v === undefined || v === '' ? '–' : String(v); }
+  function serverNow() { return Date.now() + offset; }
+  function fmtDur(s) {
+    if (s === null || s === undefined) return '–';
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + ' s';
+    if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60 ? (s % 60) + ' s' : '');
+    if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+    return Math.floor(s / 86400) + ' d ' + Math.floor((s % 86400) / 3600) + ' h';
+  }
+  function ago(ts) { return ts ? fmtDur((serverNow() - ts) / 1000) + ' ago' : 'never'; }
+  function clock(ts) {
+    if (!ts) return '–';
+    var d = new Date(ts), today = new Date();
+    var t = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    return d.toDateString() === today.toDateString() ? t : d.toLocaleDateString() + ' ' + t;
+  }
+  function timeEl(ts, text) { return ts ? el('time', {datetime: new Date(ts).toISOString(), title: new Date(ts).toLocaleString(), text: text}) : document.createTextNode(text); }
+  function dl(node, rows) {
+    clear(node);
+    rows.forEach(function (r) {
+      if (!r) return;
+      node.appendChild(el('dt', {text: r[0]}));
+      var dd = el('dd');
+      (Array.isArray(r[1]) ? r[1] : [r[1]]).forEach(function (c, i) {
+        if (i) dd.appendChild(document.createTextNode(' '));
+        dd.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      });
+      node.appendChild(dd);
+    });
+  }
+
+  function renderBanners(s) {
+    var b = $('banners'); clear(b);
+    s.alerts.forEach(function (a) { b.appendChild(el('div', {cls: 'banner ' + a.level, text: (a.level === 'error' ? 'Problem: ' : 'Note: ') + a.text})); });
+  }
+
+  function renderConnection(s) {
+    var c = s.core, m = s.mqtt, cfg = s.config;
+    var coreKind = c.state === 'up' ? 'good' : (c.state === 'starting' ? 'warn' : 'bad');
+    var age = c.last_data ? (serverNow() - c.last_data) / 1000 : null;
+    var ageCls = age === null ? 'bad-text' : (age < 60 ? 'good-text' : (age < STALE_S ? 'warn-text' : 'bad-text'));
+    var link = cfg.connection === 'nibegw'
+      ? 'NibeGW ' + dash(cfg.nibegw && cfg.nibegw.host) + ' (UDP ' + dash(cfg.nibegw && cfg.nibegw.port) + ')'
+      : 'Serial ' + dash(cfg.serial_port);
+    var mqttState = !m.enabled ? pill('off') : (m.connected ? pill('connected', 'good') : pill('disconnected', 'bad'));
+    dl($('conn'), [
+      ['Core', [pill(c.state, coreKind), c.restarts ? c.restarts + (c.restarts === 1 ? ' restart' : ' restarts') : 'no restarts']],
+      ['Link', link],
+      ['Pump', c.model ? c.model + (c.firmware ? ', firmware ' + c.firmware : '') : 'model not known yet'],
+      ['Last data', el('span', {cls: ageCls, text: c.last_data ? ago(c.last_data) : 'none yet'})],
+      ['MQTT', [mqttState, m.enabled ? dash(cfg.mqtt.host) + ':' + cfg.mqtt.port : '']],
+      m.enabled ? ['Topic', dash(cfg.mqtt.topic) + (cfg.mqtt.user ? ' as ' + cfg.mqtt.user : '') + (cfg.mqtt.password_set ? ' (password set)' : '')] : null,
+      m.enabled ? ['MQTT history', 'connected ' + m.connects + 'x, ' + m.reconnects + ' reconnect attempts'] : null,
+      m.enabled && m.last_connect ? ['Last connect', timeEl(m.last_connect, clock(m.last_connect))] : null,
+      m.enabled && m.last_disconnect ? ['Last disconnect', timeEl(m.last_disconnect, clock(m.last_disconnect))] : null,
+      m.enabled && m.last_error ? ['Last MQTT error', el('span', {cls: 'bad-text', text: m.last_error + ' (' + clock(m.last_error_at) + ')'})] : null,
+      ['Raw /set', Array.isArray(s.raw_set) ? s.raw_set.join(', ') : String(s.raw_set)],
+      ['Gateway', 'up ' + fmtDur(s.uptime_s) + ', log level ' + dash(s.log_level)]
+    ]);
+  }
+
+  function spark(svg, values, opts) {
+    clear(svg);
+    var NS = 'http://www.w3.org/2000/svg', W = 300, H = 56, pad = 2;
+    var n = values.length;
+    function mk(tag, a) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); return e; }
+    svg.appendChild(mk('line', {x1: 0, y1: H - 0.5, x2: W, y2: H - 0.5, 'class': 'spark-base'}));
+    if (!n) return 0;
+    var max = Math.max.apply(null, values.map(function (v) { return v.y; }).concat([opts.minMax || 1]));
+    var step = W / Math.max(n, 1);
+    function y(v) { return H - pad - (v / max) * (H - 2 * pad); }
+    if (opts.kind === 'line') {
+      var pts = values.map(function (v, i) { return (i * step + step / 2).toFixed(1) + ',' + y(v.y).toFixed(1); });
+      if (n === 1) pts.push((W - step / 2).toFixed(1) + ',' + y(values[0].y).toFixed(1));
+      svg.appendChild(mk('polygon', {points: (step / 2) + ',' + H + ' ' + pts.join(' ') + ' ' + (n === 1 ? W - step / 2 : (n - 1) * step + step / 2) + ',' + H, 'class': 'spark-area'}));
+      svg.appendChild(mk('polyline', {points: pts.join(' '), 'class': 'spark-line', 'vector-effect': 'non-scaling-stroke'}));
+    } else {
+      values.forEach(function (v, i) {
+        if (!v.y) return;
+        var h = Math.max(2, (v.y / max) * (H - pad));
+        svg.appendChild(mk('rect', {x: (i * step + 1).toFixed(1), y: (H - h).toFixed(1), width: Math.max(1, step - 2).toFixed(1), height: h.toFixed(1), rx: 1, 'class': 'spark-bar'}));
+      });
+    }
+    values.forEach(function (v, i) {
+      var r = mk('rect', {x: (i * step).toFixed(1), y: 0, width: step.toFixed(1), height: H, 'class': 'hit'});
+      var t = mk('title', {}); t.textContent = clock(v.t) + ': ' + v.label; r.appendChild(t);
+      svg.appendChild(r);
+    });
+    return max;
+  }
+
+  function renderBus(s) {
+    var b = s.bus.last_minute;
+    dl($('bus'), b ? [
+      ['Last minute', [el('span', {cls: 'num', text: b.ok + ' ok'}), el('span', {cls: b.chksum ? 'bad-text num' : 'num', text: b.chksum + ' CHKSUM'}), el('span', {cls: b.no_respond ? 'bad-text num' : 'num', text: b.no_respond + ' No respond'})]],
+      ['Reported', timeEl(b.timestamp, ago(b.timestamp))]
+    ] : [['Last minute', 'no report yet (one per minute)']]);
+    var h = s.bus.history;
+    var okMax = spark($('spark-ok'), h.map(function (p) { return {t: p.timestamp, y: p.ok, label: p.ok + ' ok'}; }), {kind: 'line'});
+    var errMax = spark($('spark-err'), h.map(function (p) { return {t: p.timestamp, y: p.errors, label: p.chksum + ' CHKSUM, ' + p.no_respond + ' No respond'}; }), {kind: 'bar', minMax: 1});
+    var errTotal = h.reduce(function (a, p) { return a + p.errors; }, 0);
+    $('ok-max').textContent = h.length ? 'max ' + okMax : '';
+    $('err-max').textContent = h.length ? errTotal + ' in ' + h.length + ' min' : '';
+    $('spark-ok').setAttribute('aria-label', 'OK frames per minute over the last ' + h.length + ' minutes, max ' + okMax);
+    $('spark-err').setAttribute('aria-label', errTotal + ' bus errors over the last ' + h.length + ' minutes');
+  }
+
+  function leaseState(l) {
+    if (!l) return pill('none');
+    if (l.restoring) return pill('restoring', 'warn');
+    if (l.active) return pill('active', 'good');
+    return pill('idle');
+  }
+  function expiresIn(l) {
+    if (!l || !l.expires || !(l.active || l.restoring)) return '–';
+    var s = (l.expires - serverNow()) / 1000;
+    return s <= 0 ? 'expired' : fmtDur(s);
+  }
+  function restoresTo(l) {
+    if (l.neutral_from) return 'register ' + l.neutral_from;
+    if (l.neutral !== null && l.neutral !== undefined) return String(l.neutral);
+    if (l.baseline !== null && l.baseline !== undefined) return 'baseline ' + l.baseline;
+    return 'baseline';
+  }
+
+  function renderRMU(s) {
+    var root = $('rmu'); clear(root);
+    var any = false;
+    s.rmu.forEach(function (r) {
+      var interesting = r.detected || r.last_poll || (r.lease && (r.lease.active || r.lease.restoring)) || r.last_write;
+      if (!interesting && r.system > 1) return;
+      any = true;
+      var kind = r.mode === 'emulated' ? 'good' : (r.mode === 'read-only' ? 'warn' : '');
+      var label = r.mode === 'emulated' ? 'emulated' : (r.mode === 'read-only' ? 'read-only' : 'not detected');
+      var box = el('div', {cls: 'rmu'});
+      box.appendChild(el('div', {cls: 'rmu-head'}, [el('strong', {text: 'System ' + r.system}), pill(label, kind), el('span', {cls: 'muted', text: 'address 0x' + (r.address || 0).toString(16).toUpperCase()})]));
+      var d = el('dl');
+      var pollAge = r.last_poll ? (serverNow() - r.last_poll) / 1000 : null;
+      var w = r.last_write;
+      dl(d, [
+        ['Status', r.reason],
+        ['Last pump poll', r.last_poll ? el('span', {cls: pollAge > 300 ? 'warn-text' : '', text: ago(r.last_poll)}) : 'not seen'],
+        ['Room temp (' + r.room_register + ')', r.room && r.room.value !== null ? dash(r.room.value) + ' ' + (r.room.unit || '') + (r.room.timestamp ? ', ' + ago(r.room.timestamp) : '') : '–'],
+        ['Last write', w ? [el('span', {cls: w.ok ? '' : 'bad-text', text: dash(w.value) + (w.ok ? '' : ' failed: ' + dash(w.error))}), timeEl(w.at, '(' + ago(w.at) + ')')] : 'none since start'],
+        ['Lease', r.lease ? [leaseState(r.lease), r.lease.active || r.lease.restoring ? dash(r.lease.owner) + ', ' + dash(r.lease.value) + ', expires in ' + expiresIn(r.lease) : ''] : 'not leasable']
+      ]);
+      box.appendChild(d);
+      root.appendChild(box);
+    });
+    if (!any) root.appendChild(el('p', {cls: 'muted', text: 'No RMU40 activity.'}));
+  }
+
+  function renderValues(s) {
+    var root = $('values'); clear(root);
+    if (!s.values.length) { root.appendChild(el('p', {cls: 'muted', text: 'No cached values yet. Values appear once these registers are polled.'})); return; }
+    s.values.forEach(function (v) {
+      var stale = v.timestamp && (serverNow() - v.timestamp) / 1000 > STALE_S;
+      root.appendChild(el('div', {cls: 'tile', title: v.register + ' ' + dash(v.title)}, [
+        el('div', {cls: 'label', text: v.name || v.title || v.register}),
+        el('div', {cls: 'value', text: dash(v.value) + (v.unit ? ' ' + v.unit : '')}),
+        el('div', {cls: 'age' + (stale ? ' warn-text' : ''), text: v.register + ' · ' + ago(v.timestamp)})
+      ]));
+    });
+  }
+
+  function renderLeases(s) {
+    var body = $('leases'); clear(body);
+    var all = $('lease-all').checked;
+    var rows = s.leases.filter(function (l) { return all || l.active || l.restoring || l.error; });
+    if (!rows.length) {
+      body.appendChild(el('tr', {}, [el('td', {colspan: 9, cls: 'muted', text: all ? 'No leasable registers.' : 'No active leases. Tick "Show idle registers" to see all ' + s.leases.length + '.'})]));
+      return;
+    }
+    rows.forEach(function (l) {
+      body.appendChild(el('tr', {}, [
+        el('td', {cls: 'num', text: l.register}), el('td', {text: dash(l.name)}), el('td', {}, [leaseState(l)]),
+        el('td', {cls: 'num', text: dash(l.value)}), el('td', {cls: 'num', text: dash(l.written)}), el('td', {text: dash(l.owner)}),
+        el('td', {cls: 'num countdown', 'data-reg': l.register, text: expiresIn(l)}), el('td', {text: restoresTo(l)}),
+        el('td', {cls: l.error ? 'bad-text' : '', text: dash(l.error)})
+      ]));
+    });
+  }
+
+  function tickCountdowns() {
+    if (!status) return;
+    var byReg = {};
+    status.leases.forEach(function (l) { byReg[l.register] = l; });
+    Array.prototype.forEach.call(document.querySelectorAll('.countdown'), function (td) {
+      var l = byReg[td.getAttribute('data-reg')];
+      if (l) td.textContent = expiresIn(l);
+    });
+  }
+
+  function renderLog() {
+    var body = $('log'); clear(body);
+    var q = $('log-filter').value.trim().toLowerCase();
+    var rows = logLines.filter(function (l) { return !q || (l.area + ' ' + l.message).toLowerCase().indexOf(q) !== -1; });
+    if (!rows.length) {
+      body.appendChild(el('tr', {}, [el('td', {colspan: 4, cls: 'muted', text: logLines.length ? 'No lines match the filter.' : 'Nothing logged at this level since the gateway started.'})]));
+      return;
+    }
+    rows.forEach(function (l) {
+      var kind = l.level === 'error' ? 'bad' : (l.level === 'warn' ? 'warn' : '');
+      body.appendChild(el('tr', {}, [
+        el('td', {cls: 'num nowrap'}, [timeEl(l.ts, clock(l.ts))]),
+        el('td', {}, [pill(l.level, kind)]), el('td', {text: l.area}), el('td', {cls: 'msg', text: l.message})
+      ]));
+    });
+  }
+
+  function getJSON(url) {
+    return fetch(url, {cache: 'no-store', credentials: 'same-origin'}).then(function (r) {
+      if (!r.ok) throw new Error(url + ': HTTP ' + r.status);
+      return r.json();
+    });
+  }
+
+  function refresh() {
+    var level = $('log-level').value;
+    return Promise.all([getJSON('api/status'), getJSON('api/log?level=' + encodeURIComponent(level) + '&limit=200')]).then(function (res) {
+      status = res[0];
+      offset = status.generated - Date.now();
+      logLines = res[1].lines;
+      $('version').textContent = 'v' + dash(status.version);
+      $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      $('updated').className = 'meta';
+      renderBanners(status); renderConnection(status); renderBus(status); renderRMU(status);
+      renderValues(status); renderLeases(status); renderLog();
+    }).catch(function (err) {
+      $('updated').textContent = 'Update failed: ' + err.message + ' (retrying)';
+      $('updated').className = 'meta bad-text';
+    });
+  }
+
+  function schedule() {
+    clearTimeout(timer);
+    if (document.hidden) return;
+    timer = setTimeout(function () { refresh().then(schedule); }, REFRESH_MS);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { clearTimeout(timer); $('updated').textContent = 'Paused while hidden'; }
+    else refresh().then(schedule);
+  });
+  $('lease-all').addEventListener('change', function () { if (status) renderLeases(status); });
+  $('log-level').addEventListener('change', function () { refresh(); });
+  $('log-filter').addEventListener('input', renderLog);
+  setInterval(function () { if (!document.hidden) tickCountdowns(); }, 1000);
+  refresh().then(schedule);
+})();
+</script>
+</body>
+</html>

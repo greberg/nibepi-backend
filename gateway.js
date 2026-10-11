@@ -9,11 +9,13 @@
 //
 // Settings come from <NIBEPI_CONFIG_DIR>/config.json (default /etc/nibepi),
 // created from default.json on the first run, with the NIBEPI_* environment
-// variables in lib/env.js on top. Logs go to stdout/stderr.
+// variables in lib/env.js on top. Logs go to stdout/stderr. With
+// NIBEPI_UI_PORT set, a read-only status page (lib/webui.js) listens there.
 const fs = require('fs');
 const Env = require('./lib/env');
 const log = require('./log');
 const nibe = require('./index.js');
+const WebUI = require('./lib/webui');
 
 const HEALTH_FILE = Env.healthFile();
 const HEALTH_MS = 60000;
@@ -30,6 +32,10 @@ function applyEnvironment() {
     for (const error of env.errors) log.error('Config', error);
     if(env.errors.length!==0) return false;
     nibe.applyOverrides(env.overrides);
+    // Whether it came from config.json or the environment, the MQTT
+    // password is masked in every log line from here on.
+    const mqtt = nibe.getConfig().mqtt;
+    if(mqtt!==null && typeof mqtt==='object') log.addSecret(mqtt.pass);
     const names = env.overrides.filter(o => !(o.path[0]==='mqtt' && o.path[1]==='enable')).map(o => o.path.join('.'));
     log.info('Config', `Config file ${nibe.getConfigFile()}`+(names.length!==0 ? `, from the environment: ${names.join(', ')}` : ''));
     log.info('Config', `Log level ${log.levelName()}, health file ${HEALTH_FILE}`);
@@ -128,6 +134,32 @@ function writeHealth() {
     });
 }
 
+// The status page. Its errors are logged and never stop the gateway.
+let webui;
+function startUI() {
+    const opts = Env.uiOptions(process.env);
+    for (const error of opts.errors) log.error('UI', `${error}; the status page is off`);
+    if(opts.enabled!==true) return;
+    if(opts.pass!==null) log.addSecret(opts.pass);
+    const mqttPass = () => {
+        const mqtt = nibe.getConfig().mqtt;
+        return (mqtt!==null && typeof mqtt==='object' && typeof mqtt.pass==='string' && mqtt.pass!=='') ? [mqtt.pass] : [];
+    };
+    try {
+        webui = WebUI.createWebUI({source:nibe, log:log, user:opts.user, pass:opts.pass, secrets:mqttPass});
+    } catch(err) {
+        log.error('UI', `Could not load the status page: ${err.message}`);
+        return;
+    }
+    webui.listen(opts.port, opts.bind).then(() => {
+        const where = opts.bind==='0.0.0.0' || opts.bind==='::' ? `port ${opts.port}` : `${opts.bind}:${opts.port}`;
+        log.info('UI', `Status page on ${where}`+(opts.user!==null ? ', basic auth on' : ', no auth (LAN only)'));
+    }, (err) => {
+        log.error('UI', `Could not start the status page on ${opts.bind}:${opts.port}: ${err.message}`);
+        webui = undefined;
+    });
+}
+
 let healthTimer;
 let stopping = false;
 // Leases are not released: their baselines are persisted, and the next start
@@ -137,6 +169,7 @@ function stop(signal) {
     stopping = true;
     log.info('System', `${signal} received, stopping the gateway`);
     clearInterval(healthTimer);
+    if(webui!==undefined) webui.close();
     setTimeout(() => {
         log.error('System', 'Stop timed out, exiting');
         process.exit(1);
@@ -165,6 +198,7 @@ if(applyEnvironment()!==true || startCore()!==true) {
     process.exit(1);
 }
 startMQTT();
+startUI();
 healthTimer = setInterval(writeHealth, HEALTH_MS);
 writeHealth();
 log.info('System', 'NibePi gateway started');

@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { readOverrides, configDir, healthFile, parseRawSet } = require('../lib/env');
+const { readOverrides, configDir, healthFile, parseRawSet, uiOptions } = require('../lib/env');
 
 const byPath = (list) => Object.fromEntries(list.map(o => [o.path.join('.'), o.value]));
 
@@ -51,6 +51,30 @@ test('raw_set: all, none or a list', () => {
     assert.equal(parseRawSet('none'), 'none');
     assert.deepEqual(parseRawSet('47011, 47041,'), ['47011', '47041']);
     assert.equal(parseRawSet(','), undefined);
+});
+
+test('status page: off unless NIBEPI_UI_PORT is a port', () => {
+    assert.equal(uiOptions({}).enabled, false);
+    assert.equal(uiOptions({NIBEPI_UI_PORT: ''}).enabled, false);
+    assert.equal(uiOptions({NIBEPI_UI_PORT: '0'}).enabled, false);
+    assert.deepEqual(uiOptions({NIBEPI_UI_PORT: '0'}).errors, []);
+    const bad = uiOptions({NIBEPI_UI_PORT: 'web'});
+    assert.equal(bad.enabled, false);
+    assert.equal(bad.errors.length, 1);
+    const on = uiOptions({NIBEPI_UI_PORT: '8080'});
+    assert.deepEqual(on, {enabled: true, port: 8080, bind: '0.0.0.0', user: null, pass: null, errors: []});
+    assert.equal(uiOptions({NIBEPI_UI_PORT: '8080', NIBEPI_UI_BIND: '127.0.0.1'}).bind, '127.0.0.1');
+});
+
+test('status page: user and password together or not at all', () => {
+    const both = uiOptions({NIBEPI_UI_PORT: '8080', NIBEPI_UI_USER: 'admin', NIBEPI_UI_PASS: ' pw '});
+    assert.equal(both.enabled, true);
+    assert.equal(both.user, 'admin');
+    assert.equal(both.pass, ' pw ');
+    const one = uiOptions({NIBEPI_UI_PORT: '8080', NIBEPI_UI_USER: 'admin', NIBEPI_UI_PASS: ''});
+    assert.equal(one.enabled, false);
+    assert.equal(one.errors.length, 1);
+    assert.equal(uiOptions({NIBEPI_UI_PORT: '8080', NIBEPI_UI_USER: 'a:b', NIBEPI_UI_PASS: 'x'}).enabled, false);
 });
 
 // Loads index.js against a scratch config dir, applies overrides, saves,
