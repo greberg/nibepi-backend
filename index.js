@@ -313,6 +313,9 @@ const reportedMissing = new Set();
 // <topic>bus_health, and logged as one line when there were errors.
 let noRespondCount = 0;
 let busHealth;
+// The last hour of busHealth, oldest first, for the status page.
+const BUS_HISTORY_MAX = 60;
+const busHistory = [];
 const onBusStats = (stats) => {
     busHealth = {
         timestamp: Date.now(),
@@ -322,6 +325,8 @@ const onBusStats = (stats) => {
         errors: stats.chksum + noRespondCount
     };
     noRespondCount = 0;
+    busHistory.push(busHealth);
+    if(busHistory.length>BUS_HISTORY_MAX) busHistory.splice(0, busHistory.length-BUS_HISTORY_MAX);
     if(config!==undefined && config.mqtt!==undefined && config.mqtt.topic!==undefined) {
         publishMQTT(config.mqtt.topic+"bus_health", JSON.stringify(busHealth));
     }
@@ -343,6 +348,28 @@ const onBusStats = (stats) => {
 };
 const getHealth = () => {
     return {core:coreState, model:model, lastData:lastData, restarts:restartCount, busHealth:busHealth};
+}
+// RMU40 activity per system (1-4), for the status page: the last frame the
+// pump sent to that room unit's address (0x19-0x1C) and whether the core
+// answers it (rmu false) or stays silent because another RMU40 answers or
+// rmu_emulation is false (rmu true). Kept across core restarts.
+const rmuSeen = {};
+const RMU_FIRST_ADDRESS = 0x19;
+const noteRMUFrame = (m) => {
+    const data = m.data;
+    if(data===undefined || data===null || data.length<4) return;
+    const system = data[2]-RMU_FIRST_ADDRESS+1;
+    if(system<1 || system>4) return;
+    rmuSeen[system] = {lastPoll:Date.now(), readOnly:m.rmu===true, command:data[3]};
+}
+// The last write to each RMU40 register (1xxxx) and how it ended. The pump
+// fetches it on its next poll of the room unit, which is the ACK.
+const rmuWrites = {};
+const noteRMUWrite = (address,value,err,ack) => {
+    if(String(address).charAt(0)!=="1") return;
+    const ok = !err && ack!==false;
+    rmuWrites[String(address)] = {value:value, at:Date.now(), ok:ok,
+        error: ok ? null : (err && err.message ? err.message : (err ? String(err) : 'not acknowledged'))};
 }
 const resetCore = () => {
     model = "";
@@ -495,6 +522,7 @@ const forkCore = () => {
                     if(err) log.error('Pump',err);
                     if(ready===true) cb(null,result);
                 });
+                noteRMUFrame(m);
                 if(mode==="serial") decodeRMU(n);
                 decodeMessage(n);
             } else if(m.type=="fault") {
@@ -768,6 +796,7 @@ const setData = (address,value,cb=()=>{},opts) => {
         clearTimeout(waitTimer);
         clearTimeout(ackTimer);
         if(ackListener!==undefined) nibeEmit.removeListener("ACK_"+address,ackListener);
+        noteRMUWrite(address,value,err,result);
         if(err) return cb(err);
         cb(null,result);
     };
@@ -1318,8 +1347,11 @@ function startMQTT(host,port,user,pass) {
     // reconnects by itself (reconnectPeriod) and resubscribes on reconnect.
     const client = mqtt.connect('mqtt://' + mqtt_host, mqtt_Options);
     mqtt_client = client;
+    mqttState.since = Date.now();
     client.on('connect', function () {
         if(client!==mqtt_client) return;
+        mqttState.connects++;
+        mqttState.lastConnect = Date.now();
         mqttErrorShown = false;
         log.info('MQTT','MQTT broker is connected');
         client.publish(config.mqtt.topic+'status', 'online', {qos:1, retain:true});
@@ -1334,11 +1366,19 @@ function startMQTT(host,port,user,pass) {
         resolve(client);
     });
     client.on('close',function(err){
+        if(client===mqtt_client) mqttState.lastDisconnect = Date.now();
         log.info('MQTT','MQTT broker is disconnected');
+    });
+    client.on('reconnect',function(){
+        if(client===mqtt_client) mqttState.reconnects++;
     });
     // Not ended on error: the broker may simply start after the gateway, and the
     // client keeps retrying. Reported once until the next successful connect.
     client.on('error',function(error){
+        if(client===mqtt_client) {
+            mqttState.lastError = error && error.message ? error.message : String(error);
+            mqttState.lastErrorAt = Date.now();
+        }
         if(client===mqtt_client && mqttErrorShown===false) {
             mqttErrorShown = true;
             log.error('MQTT','Could not connect to MQTT broker: '+(error && error.message ? error.message : error));
@@ -1550,6 +1590,8 @@ function onMQTTMessage(topic, message, packet) {
 }
 let mqttKey;               // settings mqtt_client was created with
 let mqttErrorShown = false;
+// Connection history for the status page.
+const mqttState = {since:null, connects:0, reconnects:0, lastConnect:null, lastDisconnect:null, lastError:null, lastErrorAt:null};
 // Called on every config update. Creates the client once and replaces it
 // (ending the old one first) only when the broker settings or topic change.
 // Before, every update while the broker was down created another client
@@ -1710,6 +1752,53 @@ const shutdown = async () => {
     }
     await stopCore();
 }
+// A read-only snapshot for the status page (lib/webui.js), which shapes and
+// redacts it. Register values come from the cache; nothing is read from the
+// pump here.
+const STATUS_REGISTERS = ['40004','40008','40012','40013','40014','40033','47011','43086'];
+const cachedValue = (reg) => {
+    const item = register.find(item => item.register == reg);
+    if(item===undefined) return null;
+    return {register:String(reg), title:item.titel, value:item.data===undefined ? null : item.data,
+        raw:item.raw_data===undefined ? null : item.raw_data, unit:item.unit===undefined ? '' : item.unit,
+        timestamp:item.timestamp===undefined ? null : item.timestamp, mode:item.mode};
+}
+const getStatus = () => {
+    const table = leases!==undefined ? leases.table : {};
+    const leaseList = Object.keys(table).sort().map(reg => Object.assign(
+        {register:reg, name:table[reg].name===undefined ? null : table[reg].name,
+            min:table[reg].min===undefined ? null : table[reg].min, max:table[reg].max===undefined ? null : table[reg].max},
+        leases.state(reg)));
+    const rmuList = [1,2,3,4].map(system => {
+        const room = String(10000+(system-1)*100+60);
+        const item = register.find(item => item.register == room);
+        return {
+            system: system,
+            address: RMU_FIRST_ADDRESS+system-1,
+            detected: rmu['s'+system]===true,
+            writable: item!==undefined ? item.mode==='R/W' : null,
+            lastPoll: rmuSeen[system]!==undefined ? rmuSeen[system].lastPoll : null,
+            readOnly: rmuSeen[system]!==undefined ? rmuSeen[system].readOnly : null,
+            roomRegister: room,
+            room: cachedValue(room),
+            lastWrite: rmuWrites[room]!==undefined ? Object.assign({}, rmuWrites[room]) : null,
+            lease: leases!==undefined && table[room]!==undefined ? leases.state(room) : null
+        };
+    });
+    const values = STATUS_REGISTERS.map(cachedValue).filter(v => v!==null && v.timestamp!==null);
+    return {
+        version: nibepi_version,
+        core: {state:coreState, restarts:restartCount, model:model, firmware:firmware, lastData:lastData,
+            connected: core!==undefined && core.connected===true},
+        busHealth: busHealth===undefined ? null : Object.assign({}, busHealth),
+        busHistory: busHistory.map(b => Object.assign({}, b)),
+        mqtt: Object.assign({connected: mqtt_client!==undefined && mqtt_client.connected===true, active: mqtt_client!==undefined}, mqttState),
+        rawSet: gatewayConfig().raw_set===undefined ? 'all' : gatewayConfig().raw_set,
+        leases: leaseList,
+        rmu: rmuList,
+        values: values
+    };
+}
 module.exports = {
     reqData:reqData,
     setData:setData,
@@ -1727,5 +1816,6 @@ module.exports = {
     saveConfig:saveConfig,
     getRegister:getRegister,
     getHealth:getHealth,
+    getStatus:getStatus,
     handleMQTT:handleMQTT
 }
