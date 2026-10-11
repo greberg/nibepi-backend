@@ -1453,6 +1453,19 @@ function publishDiscovery() {
     for (const reg in discovery.removed) cmps[reg] = {p:'sensor'};
     Object.assign(cmps, discovery.components);
     if(Object.keys(cmps).length===0) return;
+    // Bus health is not a register: announce it so Home Assistant gets a sensor
+    // without a hand-written MQTT entity (errors per minute, details as attributes).
+    cmps.bus_health = {
+        p: 'sensor',
+        name: 'Bus errors',
+        unique_id: discoveryId()+'_bus_health',
+        state_topic: config.mqtt.topic+'bus_health',
+        value_template: '{{ value_json.errors }}',
+        json_attributes_topic: config.mqtt.topic+'bus_health',
+        unit_of_measurement: 'errors/min',
+        state_class: 'measurement',
+        entity_category: 'diagnostic',
+    };
     let message = {
         dev: {ids:[discoveryId()], name:'Nibe '+model, mf:'NIBE', mdl:model, sw:String(firmware)},
         o: {name:'NibePi', sw:nibepi_version, url:'https://github.com/fnordpojk/nibepi-backend'},
