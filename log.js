@@ -8,12 +8,24 @@
 //
 // Read here at load, so messages logged while index.js loads its config
 // already follow them.
+//
+// The last lines at info and above are also kept in memory for the status
+// page (lib/webui.js), whatever the level: RECENT_MAX of them, and the last
+// PROBLEM_MAX warnings and errors separately, so a burst of info lines does
+// not push them out. Registered secrets (addSecret) are masked in every line.
 const fs = require('fs');
 
 const LEVELS = {error:0, warn:1, info:2, debug:3, trace:4};
 const DEFAULT_LEVEL = 'info';
 // One rotated generation is kept, so a log file costs at most twice this.
 const MAX_BYTES = 5 * 1024 * 1024;
+
+const RECENT_MAX = 500;
+const PROBLEM_MAX = 200;
+const MESSAGE_MAX = 2000;
+const MASK = '***';
+// Shorter values would mask ordinary words and numbers all over the log.
+const SECRET_MIN = 4;
 
 let threshold = LEVELS[DEFAULT_LEVEL];
 let filePath = null;
@@ -83,6 +95,71 @@ function toFile(line) {
     }
 }
 
+let secrets = [];
+const recent = [];
+const problems = [];
+let seq = 0;
+
+// A value (a password) that must never show up in a log line.
+function addSecret(value) {
+    if (value === undefined || value === null) return;
+    const text = String(value);
+    if (text.length < SECRET_MIN || secrets.includes(text)) return;
+    // Longest first, so a secret containing another is masked whole.
+    secrets = secrets.concat([text]).sort((a, b) => b.length - a.length);
+}
+
+function clearSecrets() {
+    secrets = [];
+}
+
+function redact(text) {
+    let out = String(text);
+    for (const secret of secrets) {
+        if (out.includes(secret)) out = out.split(secret).join(MASK);
+    }
+    return out;
+}
+
+function push(list, max, entry) {
+    list.push(entry);
+    if (list.length > max) list.splice(0, list.length - max);
+}
+
+function remember(level, kind, text) {
+    if (LEVELS[level] > LEVELS.info) return;
+    const entry = {
+        seq: ++seq,
+        ts: Date.now(),
+        level: level,
+        area: redact(kind),
+        message: text.length > MESSAGE_MAX ? text.slice(0, MESSAGE_MAX) + '...' : text
+    };
+    push(recent, RECENT_MAX, entry);
+    if (LEVELS[level] <= LEVELS.warn) push(problems, PROBLEM_MAX, entry);
+}
+
+// Kept lines at level and above, newest first, at most limit of them.
+// warn and error come from the separate list, which reaches further back.
+function recentLines(opts = {}) {
+    const name = String(opts.level === undefined || opts.level === null ? 'info' : opts.level).toLowerCase();
+    const level = LEVELS[name] !== undefined && LEVELS[name] <= LEVELS.info ? LEVELS[name] : LEVELS.info;
+    let limit = Number(opts.limit);
+    if (!Number.isInteger(limit) || limit <= 0) limit = 200;
+    limit = Math.min(limit, RECENT_MAX);
+    const source = level <= LEVELS.warn ? problems : recent;
+    const out = [];
+    for (let i = source.length - 1; i >= 0 && out.length < limit; i--) {
+        if (LEVELS[source[i].level] <= level) out.push(Object.assign({}, source[i]));
+    }
+    return out;
+}
+
+function clearRecent() {
+    recent.length = 0;
+    problems.length = 0;
+}
+
 function format(message) {
     if (message instanceof Error) return message.stack || message.message;
     if (Array.isArray(message)) return `[${message}]`;
@@ -93,8 +170,12 @@ function format(message) {
 }
 
 function write(level, kind, message) {
+    const keep = LEVELS[level] !== undefined && LEVELS[level] <= LEVELS.info;
+    if (!enabled(level) && !keep) return;
+    const text = redact(format(message));
+    if (keep) remember(level, String(kind), text);
     if (!enabled(level)) return;
-    const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${kind}] ${format(message)}\n`;
+    const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${redact(kind)}] ${text}\n`;
     try {
         if (LEVELS[level] <= LEVELS.warn) process.stderr.write(line);
         else process.stdout.write(line);
@@ -114,6 +195,13 @@ module.exports = {
     setFile: setFile,
     enabled: enabled,
     write: write,
+    addSecret: addSecret,
+    clearSecrets: clearSecrets,
+    redact: redact,
+    recent: recentLines,
+    clearRecent: clearRecent,
+    RECENT_MAX: RECENT_MAX,
+    PROBLEM_MAX: PROBLEM_MAX,
     error: (kind, message) => write('error', kind, message),
     warn: (kind, message) => write('warn', kind, message),
     info: (kind, message) => write('info', kind, message),
