@@ -7,7 +7,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { readOverrides, configDir, healthFile, parseRawSet, uiOptions } = require('../lib/env');
+const { readOverrides, configDir, healthFile, parseRawSet, uiOptions, buildId } = require('../lib/env');
+
+test('build id', () => {
+    assert.equal(buildId({}), null);
+    assert.equal(buildId({NIBEPI_BUILD: ' 20261017-8c768f5 '}), '20261017-8c768f5');
+    assert.equal(buildId({NIBEPI_BUILD: ''}), null);
+    assert.equal(buildId({NIBEPI_BUILD: '<script>'}), null);
+    assert.equal(buildId({NIBEPI_BUILD: 'x'.repeat(65)}), null);
+});
 
 const byPath = (list) => Object.fromEntries(list.map(o => [o.path.join('.'), o.value]));
 

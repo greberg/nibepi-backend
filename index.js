@@ -44,6 +44,9 @@ const EventEmitter = require('events').EventEmitter
 const nibeEmit = new EventEmitter();
 const fs = require('fs');
 const Env = require(__dirname+'/lib/env');
+// The image's build (date and backend commit), null outside the image.
+const nibepi_build = Env.buildId();
+if(nibepi_build!==null) log.info('System',`Build ${nibepi_build}`);
 // NIBEPI_CONFIG_DIR, default /etc/nibepi. The gateway always runs with a
 // writable config directory.
 const path = Env.configDir();
@@ -1681,6 +1684,7 @@ const publishGatewayState = () => {
     const rawSet = gatewayConfig().raw_set;
     publishMQTT(config.mqtt.topic+'gateway/state',JSON.stringify({
         version: nibepi_version,
+        build: nibepi_build,
         leases: leases.summary(),
         raw_set: rawSet===undefined ? "all" : rawSet,
         core: coreState,
@@ -1801,6 +1805,7 @@ const getStatus = () => {
     const values = STATUS_REGISTERS.map(cachedValue).filter(v => v!==null && v.timestamp!==null);
     return {
         version: nibepi_version,
+        build: nibepi_build,
         core: {state:coreState, restarts:restartCount, model:model, firmware:firmware, lastData:lastData,
             connected: core!==undefined && core.connected===true},
         busHealth: busHealth===undefined ? null : Object.assign({}, busHealth),

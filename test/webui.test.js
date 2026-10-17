@@ -45,7 +45,9 @@ const snapshot = (extra = {}) => Object.assign({
 
 test('status JSON shape', () => {
     const s = WebUI.buildStatus(snapshot(), config(), {now: NOW, uptime: 120, logLevel: 'info', auth: true});
-    for (const key of ['generated', 'version', 'uptime_s', 'started', 'config', 'core', 'bus', 'mqtt', 'raw_set', 'leases', 'rmu', 'values', 'alerts', 'ui']) {
+    assert.equal(s.build, null);
+    assert.equal(WebUI.buildStatus(snapshot({build: '20261017-8c768f5'}), config(), {now: NOW}).build, '20261017-8c768f5');
+    for (const key of ['generated', 'version', 'build', 'uptime_s', 'started', 'config', 'core', 'bus', 'mqtt', 'raw_set', 'leases', 'rmu', 'values', 'alerts', 'ui']) {
         assert.ok(key in s, key);
     }
     assert.equal(s.core.state, 'up');

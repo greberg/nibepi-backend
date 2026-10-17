@@ -100,6 +100,7 @@ with an error.
 | `NIBEPI_HEALTH_FILE` | health file path | `/dev/shm/nibepi-health.json` |
 | `NIBEPI_UI_PORT` | status page port; empty or `0` turns it off (not a config key) | off (`8080` in the Docker image) |
 | `NIBEPI_UI_BIND` | address the status page listens on | `0.0.0.0` |
+| `NIBEPI_BUILD` | build id shown on the status page and in `gateway/state` (not a config key; the image sets it to `<date>-<backend commit>`) | (none) |
 | `NIBEPI_UI_USER`, `NIBEPI_UI_PASS` | HTTP Basic auth for the status page; set both or neither | (no auth) |
 
 ### config.json
@@ -144,7 +145,7 @@ contract, including the rationale for leases, is in
 | `Tlease/<reg>/set` | → gateway, **not retained** | `{"value": -2, "ttl": 900, "owner": "ha"}` |
 | `Tlease/<reg>/release` | → gateway, not retained | anything |
 | `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, neutral_from, owner, error` |
-| `Tgateway/state` | gateway →, retained, per minute | `version, leases, raw_set, core, lastData` |
+| `Tgateway/state` | gateway →, retained, per minute | `version, build, leases, raw_set, core, lastData` |
 | `homeassistant/device/nibepi_<id>/config` | gateway →, retained | discovery, when `mqtt.discovery` is `true` |
 
 ### Leases

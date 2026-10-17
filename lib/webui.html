@@ -392,7 +392,7 @@ a { color: var(--accent); }
       status = res[0];
       offset = status.generated - Date.now();
       logLines = res[1].lines;
-      $('version').textContent = 'v' + dash(status.version);
+      $('version').textContent = 'v' + dash(status.version) + (status.build ? ' (build ' + status.build + ')' : '');
       $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
       $('updated').className = 'meta';
       renderBanners(status); renderConnection(status); renderBus(status); renderRMU(status);
