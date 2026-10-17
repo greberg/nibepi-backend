@@ -169,9 +169,24 @@ function showError(error) {
     }
 }
 
+// The pump answers a write in its write slot with one byte, ACK (0x06) or
+// NAK (0x15). It used to be dropped, so a refused write looked like success.
+let pendingWrite = null;
+function reportWrite(ok) {
+    if(pendingWrite===null) return;
+    if(process.connected===true) {
+        process.send({type:"writeResult",data:{register:pendingWrite,ok:ok}});
+    }
+    pendingWrite = null;
+}
 function analyzeData(data) {
     if(process.connected===true) {
         process.send({type:"log",data:Array.from(data),level:"core",kind:"RAW"});
+    }
+    if(pendingWrite!==null && data.length!==0) {
+        if(data[0]===0x06) reportWrite(true);
+        else if(data[0]===0x15) reportWrite(false);
+        else if(data[0]===0x5C) reportWrite(null);  // no answer before the next frame
     }
     // Sometimes and ACK [0x06] is the first byte, and the second byte is the start. We shift it.
     if(data[0]===0x06 && data[1]===0x5C) {
@@ -404,6 +419,7 @@ const makeResponse = (data) => {
                     process.send({type:"ack",data:{register:address,ack:true}});
                     process.send({type:"log",data:`Register: ${address}, Buffer: ${JSON.stringify(lastMsg)}`,level:"debug",kind:"SENT"});
                 }
+                pendingWrite = address;
                 myPort.write(lastMsg);
                 resolve(data);
             } else {

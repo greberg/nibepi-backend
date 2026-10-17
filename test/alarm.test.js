@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { resetAlarmList, shouldReset, MIN_GAP_MS } = require('../lib/alarm');
+const { resetAlarmList, shouldReset, gapAfter, MIN_GAP_MS, SLOW_GAP_MS } = require('../lib/alarm');
 
 test('default list is the MODBUS communication alarm only', () => {
     assert.deepStrictEqual(resetAlarmList({}), [251]);
@@ -23,4 +23,12 @@ test('resets only listed alarms', () => {
 test('waits between resets', () => {
     assert.strictEqual(shouldReset(251, [251], 1000, 1000 + MIN_GAP_MS - 1), false);
     assert.strictEqual(shouldReset(251, [251], 1000, 1000 + MIN_GAP_MS), true);
+});
+
+test('backs off after resets that did not clear the alarm', () => {
+    assert.strictEqual(gapAfter(0), MIN_GAP_MS);
+    assert.strictEqual(gapAfter(2), MIN_GAP_MS);
+    assert.strictEqual(gapAfter(3), SLOW_GAP_MS);
+    assert.strictEqual(shouldReset(251, [251], 0, MIN_GAP_MS, gapAfter(3)), false);
+    assert.strictEqual(shouldReset(251, [251], 0, SLOW_GAP_MS, gapAfter(3)), true);
 });

@@ -534,6 +534,8 @@ const forkCore = () => {
                 nibeEmit.emit('fault',m.data);
             } else if(m.type=="ack") {
                 nibeEmit.emit("ACK_"+m.data.register,m.data.ack);
+            } else if(m.type=="writeResult") {
+                onWriteResult(m.data);
             } else if(m.type=="busStats") {
                 onBusStats(m.data);
             } else if(m.type=="log") {
@@ -1738,28 +1740,44 @@ let gatewayTimer = setInterval(() => {
     leases.publishAll();
     checkCommsAlarm('watch');
 }, 60000);
+// The pump's answer to each write (backend.js): refused writes are logged,
+// and listeners such as the alarm reset get the result.
+const onWriteResult = (result) => {
+    const reg = result.register;
+    if(result.ok===false) log.warn('Write',`The pump refused the write to register ${reg} (NAK)`);
+    else if(result.ok===null) log.debug('Write',`No answer from the pump to the write to register ${reg}`);
+    else log.debug('Write',`The pump accepted the write to register ${reg}`);
+    nibeEmit.emit('writeResult_'+reg, result.ok);
+};
 // Acknowledge the pump's communication alarm (251) that a gateway restart
 // leaves behind, and nothing else (lib/alarm.js).
 const alarm = require('./lib/alarm');
-let alarmCheck = {running:false, lastResetAt:undefined};
+let alarmCheck = {running:false, lastResetAt:undefined, failures:0};
 const checkCommsAlarm = (reason) => {
     if(alarmCheck.running || coreState!=='up' || model==="") return;
     if(register.findIndex(i => i.register == 45001)===-1 || register.findIndex(i => i.register == 45171)===-1) return;
     alarmCheck.running = true;
     reqData(45001).then(data => {
         const raw = data!==undefined ? data.raw_data : undefined;
-        if(!alarm.shouldReset(raw, alarm.resetAlarmList(config), alarmCheck.lastResetAt, Date.now())) return;
+        if(Number(raw)===0) alarmCheck.failures = 0;
+        if(!alarm.shouldReset(raw, alarm.resetAlarmList(config), alarmCheck.lastResetAt, Date.now(), alarm.gapAfter(alarmCheck.failures))) return;
         alarmCheck.lastResetAt = Date.now();
-        log.warn('Pump',`Alarm ${raw} active (${reason}), resetting it`);
+        log.warn('Pump',`Alarm ${raw} active (${reason}), resetting it (attempt ${alarmCheck.failures+1})`);
+        nibeEmit.once('writeResult_45171', (ok) => {
+            const answer = ok===true ? 'accepted (ACK)' : ok===false ? 'REFUSED (NAK)' : 'did not answer';
+            log.info('Pump',`The pump ${answer} the alarm reset`);
+        });
         setData(45171, 1, (err) => {
             if(err) return log.error('Pump',`Could not reset alarm ${raw}: ${err.message || err}`);
             setTimeout(() => {
                 reqData(45001).then(after => {
                     const now = after!==undefined ? after.raw_data : undefined;
                     if(Number(now)===Number(raw)) {
+                        alarmCheck.failures++;
                         log.error('Pump',`Alarm ${raw} is still active after the reset`);
                         nibeEmit.emit('fault',{from:"Värmepump",message:`Larm ${raw} kvarstår efter återställning.`});
                     } else {
+                        alarmCheck.failures = 0;
                         log.info('Pump',`Alarm ${raw} reset`);
                     }
                 }).catch(logCatch);
