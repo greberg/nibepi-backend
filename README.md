@@ -280,6 +280,15 @@ To enable Modbus on the pump, use the pump's own display:
 For wiring (12 V, A, B, GND), see Nibe's documentation:
 <https://www.nibe.fi/nibedocuments/15050/031725-6.pdf>
 
+### Communication alarm after a restart
+
+While the gateway restarts, the pump gets no answers from its MODBUS40
+accessory and raises alarm 251. The gateway checks register 45001 when it
+has connected and once a minute after that; when it holds 251 it writes
+45171 = 1 (alarm reset) and reads 45001 again 30 s later. Other alarms are
+never acknowledged. `system.reset_alarms` in config.json overrides the
+list, e.g. `[251]` (default) or `[]` to switch the reset off.
+
 ## Supported pumps
 
 Register tables ship for these models:

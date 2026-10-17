@@ -193,6 +193,8 @@ const modelKnown = () => {
         clearTimeout(waiter.timer);
         waiter.resolve();
     }
+    // A restart leaves the pump with a MODBUS alarm: check it right away.
+    setTimeout(() => checkCommsAlarm('start'), 5000);
 };
 process.on('exit', (code) => {
     log.info('System',`NibePi stopping (exit code ${code})`);
@@ -610,16 +612,7 @@ const announcment = (msg,cb) => {
         
     } else if(msg.data[3]==109) {
         
-        let index = register.findIndex(i => i.register == 45001);
-        if(index!==-1) {
-            reqData(45001).then(atad => {
-                let data = Object.assign({}, atad);
-                if(data!==undefined && data.raw_data===251) {
-                    log.info('Pump','Resetting the MODBUS alarm (251)');
-                    setData(45171,1);
-                }
-            }).catch(logCatch)
-        }
+        checkCommsAlarm('announcement');
         
         //console.log(`Announcement message`);
         if(model=="") {
@@ -1743,7 +1736,37 @@ leases = new Lease.LeaseManager({
 let gatewayTimer = setInterval(() => {
     publishGatewayState();
     leases.publishAll();
+    checkCommsAlarm('watch');
 }, 60000);
+// Acknowledge the pump's communication alarm (251) that a gateway restart
+// leaves behind, and nothing else (lib/alarm.js).
+const alarm = require('./lib/alarm');
+let alarmCheck = {running:false, lastResetAt:undefined};
+const checkCommsAlarm = (reason) => {
+    if(alarmCheck.running || coreState!=='up' || model==="") return;
+    if(register.findIndex(i => i.register == 45001)===-1 || register.findIndex(i => i.register == 45171)===-1) return;
+    alarmCheck.running = true;
+    reqData(45001).then(data => {
+        const raw = data!==undefined ? data.raw_data : undefined;
+        if(!alarm.shouldReset(raw, alarm.resetAlarmList(config), alarmCheck.lastResetAt, Date.now())) return;
+        alarmCheck.lastResetAt = Date.now();
+        log.warn('Pump',`Alarm ${raw} active (${reason}), resetting it`);
+        setData(45171, 1, (err) => {
+            if(err) return log.error('Pump',`Could not reset alarm ${raw}: ${err.message || err}`);
+            setTimeout(() => {
+                reqData(45001).then(after => {
+                    const now = after!==undefined ? after.raw_data : undefined;
+                    if(Number(now)===Number(raw)) {
+                        log.error('Pump',`Alarm ${raw} is still active after the reset`);
+                        nibeEmit.emit('fault',{from:"Värmepump",message:`Larm ${raw} kvarstår efter återställning.`});
+                    } else {
+                        log.info('Pump',`Alarm ${raw} reset`);
+                    }
+                }).catch(logCatch);
+            }, 30000);
+        });
+    }).catch(logCatch).finally(() => { alarmCheck.running = false; });
+};
 // Clean stop for gateway.js. Nothing is released or restored: the persisted
 // baselines start grace leases on the next run, so the owner can renew
 // across a restart. A pending config save is written first, and MQTT says
