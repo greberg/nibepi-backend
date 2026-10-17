@@ -32,11 +32,11 @@ class FakeClock {
 function setup(opts={}) {
     const h = {
         clock: new FakeClock(),
-        pump: Object.assign({'47011':1, '47010':0, '47041':1, '48132':0, '10060':20, '47398':20.5}, opts.pump),
+        pump: Object.assign({'47011':1, '47010':0, '47041':1, '48132':0, '47047':50, '10060':20, '47398':20.5}, opts.pump),
         writes: [], reads: [], persisted: [], states: [], faults: [], failWrites: 0, failReads: 0
     };
     // Register factors as in the model files; other registers are not rounded.
-    const factors = {'10060':10, '47398':10};
+    const factors = {'10060':10, '47398':10, '47047':10};
     h.m = new LeaseManager({
         clock: h.clock,
         table: buildTable(opts.overrides),
@@ -300,6 +300,35 @@ test('RMU40 room temperature: one decimal, no baseline read, persisted for a res
         assert.match((await h.m.acquire('10060', lease(value))).error, pattern);
     }
     assert.equal(h.m.state('10060').value, 21.4, 'a rejected value keeps the lease');
+});
+
+test('stop temperature HW luxury: factor-10 values, 45..70, restores the baseline', async () => {
+    const h = setup({pump:{'47047':50.5}});
+    const res = await h.m.acquire('47047', lease(60));
+    assert.equal(res.ok, true);
+    assert.deepEqual(h.reads, ['47047'], 'a baseline is read');
+    assert.deepEqual(h.persisted, [{'47047':50.5}]);
+    assert.deepEqual(h.writes, [['47047', 60]]);
+    await h.clock.advance(60000);
+    await h.m.acquire('47047', lease(62.54));
+    assert.deepEqual(h.writes[1], ['47047', 62.5], 'rounded to one decimal');
+    assert.equal(Math.round(h.writes[1][1]*10), 625, 'raw value for factor 10');
+    await h.clock.advance(60000);
+    await h.m.acquire('47047', lease(62.51));         // the same raw 625
+    assert.equal(h.writes.length, 2);
+    for (const value of [44.9, 70.1]) {
+        assert.match((await h.m.acquire('47047', lease(value))).error, /outside lease limits 45..70/);
+    }
+    assert.equal(h.m.state('47047').value, 62.5, 'a rejected value keeps the lease');
+    await h.m.release('47047');
+    assert.deepEqual(h.writes[2], ['47047', 50.5], 'release restores the baseline');
+    assert.deepEqual(h.persisted[h.persisted.length-1], {});
+});
+
+test('lease table: stop temperature HW luxury', () => {
+    const t = buildTable();
+    assert.deepEqual([t['47047'].min, t['47047'].max, t['47047'].neutral, t['47047'].min_interval], [45, 70, null, 60]);
+    assert.equal(neutralValue(t['47047'], {}), null);
 });
 
 test('a sensor feed: changes are written once per min_interval, last value wins, renewals do not write', async () => {

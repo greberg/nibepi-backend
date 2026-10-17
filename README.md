@@ -153,6 +153,8 @@ contract, including the rationale for leases, is in
   - curve offsets 47011 and 47010 (-10..10; they restore to
     `home.adjust_s1` / `_s2`)
   - hot water comfort mode 47041 and hot water period 47134
+  - stop temperature HW luxury 47047 (45..70 °C, one decimal; restores the
+    baseline), raised by Home Assistant's legionella guard
   - temporary lux 48132
   - the cut-off frequency registers 48659–48664
   - the RMU40 room temperature 10060/10160/10260/10360 for systems 1–4 (see
