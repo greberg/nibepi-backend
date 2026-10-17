@@ -94,6 +94,7 @@ with an error.
 | `NIBEPI_MQTT_USER` | `mqtt.user` | |
 | `NIBEPI_MQTT_PASS` | `mqtt.pass` | |
 | `NIBEPI_MQTT_TOPIC` | `mqtt.topic`; a trailing `/` is added if missing | `nibe/modbus/` |
+| `NIBEPI_MQTT_DISCOVERY` | `mqtt.discovery`: `true` or `false` | `false` |
 | `NIBEPI_RAW_SET` | `gateway.raw_set`: `all`, `none` or `47011,47041,...` | `all` |
 | `NIBEPI_LOG_LEVEL` | `error`, `warn`, `info`, `debug`, `trace` (raw bus frames) | `info` |
 | `NIBEPI_LOG_FILE` | also append the log to this file, rotated at 5 MB | (off) |
@@ -111,7 +112,7 @@ with an error.
 | `serial.port` | serial device, e.g. `/dev/ttyAMA0` |
 | `nibegw.host`, `nibegw.port` | NibeGW host, and the local UDP port it sends to. Older configs that put the host in `serial.port` still work. |
 | `mqtt.host`, `port`, `user`, `pass`, `topic` | broker and topic prefix. MQTT is on when `host` is set, unless `mqtt.enable` is `false`. |
-| `mqtt.discovery` | `true` publishes Home Assistant MQTT discovery for the polled registers |
+| `mqtt.discovery` | `true` publishes Home Assistant MQTT discovery for the polled registers and the bus errors (`NIBEPI_MQTT_DISCOVERY`) |
 | `registers` | registers polled continuously, managed through `T<reg>/add` and `/remove` |
 | `home.adjust_s1`, `home.adjust_s2` | neutral curve offset for system 1/2, the restore target of the 47011/47010 leases |
 | `system.rmu_emulation` | `false` never answers the pump as RMU40; use it when a physical RMU40 is on the bus |

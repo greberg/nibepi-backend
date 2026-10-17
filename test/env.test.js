@@ -36,22 +36,30 @@ test('every variable maps to its config key', () => {
         NIBEPI_CONNECTION: 'nibegw', NIBEPI_SERIAL_PORT: '/dev/ttyUSB0',
         NIBEPI_NIBEGW_HOST: 'nibegw.local', NIBEPI_NIBEGW_PORT: '9998',
         NIBEPI_MQTT_HOST: 'broker', NIBEPI_MQTT_PORT: '1884', NIBEPI_MQTT_USER: 'u',
-        NIBEPI_MQTT_PASS: 'p', NIBEPI_MQTT_TOPIC: 'nibe/gw', NIBEPI_RAW_SET: 'none'
+        NIBEPI_MQTT_PASS: 'p', NIBEPI_MQTT_TOPIC: 'nibe/gw', NIBEPI_RAW_SET: 'none',
+        NIBEPI_MQTT_DISCOVERY: 'true'
     });
     assert.deepEqual(r.errors, []);
     assert.deepEqual(byPath(r.overrides), {
         'connection.enable': 'nibegw', 'serial.port': '/dev/ttyUSB0',
         'nibegw.host': 'nibegw.local', 'nibegw.port': 9998,
         'mqtt.host': 'broker', 'mqtt.enable': true, 'mqtt.port': 1884, 'mqtt.user': 'u',
-        'mqtt.pass': 'p', 'mqtt.topic': 'nibe/gw/', 'gateway.raw_set': 'none'
+        'mqtt.pass': 'p', 'mqtt.topic': 'nibe/gw/', 'gateway.raw_set': 'none',
+        'mqtt.discovery': true
     });
     assert.equal(r.overrides.find(o => o.path.join('.')==='mqtt.pass').secret, true);
 });
 
 test('invalid values are errors, not overrides', () => {
-    const r = readOverrides({NIBEPI_CONNECTION: 'tcp', NIBEPI_MQTT_PORT: 'abc', NIBEPI_NIBEGW_PORT: '70000', NIBEPI_RAW_SET: '47011,x'});
+    const r = readOverrides({NIBEPI_CONNECTION: 'tcp', NIBEPI_MQTT_PORT: 'abc', NIBEPI_NIBEGW_PORT: '70000', NIBEPI_RAW_SET: '47011,x', NIBEPI_MQTT_DISCOVERY: 'yes'});
     assert.equal(r.overrides.length, 0);
-    assert.equal(r.errors.length, 4);
+    assert.equal(r.errors.length, 5);
+});
+
+test('MQTT discovery: true or false, empty is unset', () => {
+    assert.deepEqual(byPath(readOverrides({NIBEPI_MQTT_DISCOVERY: ' TRUE '}).overrides), {'mqtt.discovery': true});
+    assert.deepEqual(byPath(readOverrides({NIBEPI_MQTT_DISCOVERY: 'false'}).overrides), {'mqtt.discovery': false});
+    assert.deepEqual(readOverrides({NIBEPI_MQTT_DISCOVERY: ''}), {overrides: [], errors: []});
 });
 
 test('raw_set: all, none or a list', () => {
@@ -106,10 +114,12 @@ function saveWith(fileConfig, overrides) {
 test('first run writes config.json from default.json, without overrides', () => {
     const saved = saveWith(undefined, [
         {path: ['mqtt', 'host'], value: 'broker'}, {path: ['mqtt', 'enable'], value: true},
-        {path: ['mqtt', 'pass'], value: 'secret'}, {path: ['gateway', 'raw_set'], value: 'none'}
+        {path: ['mqtt', 'pass'], value: 'secret'}, {path: ['gateway', 'raw_set'], value: 'none'},
+        {path: ['mqtt', 'discovery'], value: true}
     ]);
     const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'default.json'), 'utf8'));
     assert.equal(saved.mqtt.host, defaults.mqtt.host);
+    assert.equal(saved.mqtt.discovery, false);
     assert.equal(saved.mqtt.pass, defaults.mqtt.pass);
     assert.equal('enable' in saved.mqtt, false);
     assert.equal(saved.gateway.raw_set, defaults.gateway.raw_set);
@@ -125,9 +135,10 @@ test('an old config keeps its unknown keys and its own values', () => {
     };
     const saved = saveWith(old, [
         {path: ['mqtt', 'pass'], value: 'secret'}, {path: ['nibegw', 'host'], value: 'gw'},
-        {path: ['serial', 'port'], value: '/dev/ttyUSB0'}
+        {path: ['serial', 'port'], value: '/dev/ttyUSB0'}, {path: ['mqtt', 'discovery'], value: true}
     ]);
     assert.equal(saved.mqtt.pass, 'old');
+    assert.equal('discovery' in saved.mqtt, false);
     assert.equal(saved.serial.port, '/dev/ttyAMA0');
     assert.equal('nibegw' in saved, false);
     assert.deepEqual(saved.price, old.price);
