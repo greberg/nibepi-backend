@@ -519,6 +519,12 @@ const forkCore = () => {
             log.info('RMU40','RMU40 emulation disabled (system.rmu_emulation=false), RMU40 registers are read-only');
             core.send({type:"rmuEmulation",data:false});
         }
+        if(config.system.reset_alarm_on_start===true) {
+            // The pump only takes the reset of its MODBUS alarm (251) this
+            // early; it also acknowledges any other alarm active right now.
+            log.warn('Pump','Resetting pump alarms at start (system.reset_alarm_on_start), like the original NibePi');
+            core.send({type:"resetOnStart"});
+        }
         core.on('message', fromCore((m) => {
             if(m.type=="data") {
                 markData();
@@ -1745,6 +1751,7 @@ let gatewayTimer = setInterval(() => {
 const onWriteResult = (result) => {
     const reg = result.register;
     if(result.ok===false) log.warn('Write',`The pump refused the write to register ${reg} (NAK)`);
+    else if(String(reg)==='45171') log.info('Write',`Alarm reset: the pump ${result.ok===true ? 'accepted it (ACK)' : 'did not answer'}`);
     else if(result.ok===null) log.debug('Write',`No answer from the pump to the write to register ${reg}`);
     else log.debug('Write',`The pump accepted the write to register ${reg}`);
     nibeEmit.emit('writeResult_'+reg, result.ok);

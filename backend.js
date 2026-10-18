@@ -37,6 +37,8 @@ var myPort;
 // 48852=0: Modbus40 word order. No alarm reset (45171) at start: that
 // acknowledged every pending pump alarm. index.js resets only MODBUS alarm 251.
 const sendQueue = [[192,107,6,212,190,0,0,0,0,199]];
+// 45171=1, only queued at start with system.reset_alarm_on_start (index.js).
+const ALARM_RESET = [192,107,6,115,176,1,0,0,0,111];
 const getQueue = [];
 const rmuQueue = [];
 var regQueue = [];
@@ -113,6 +115,11 @@ process.on('message', (m) => {
         queueWrite(rmuQueue, m.data, (msg) => msg.address, "rmuSet");
     } else if(m.type=="regRegister") {
         regQueue = m.data;
+    } else if(m.type=="resetOnStart") {
+        // The original NibePi's start: alarm reset (45171=1) as the very first
+        // write and once more after the word order, before anything else.
+        sendQueue.unshift(ALARM_RESET.slice());
+        sendQueue.push(ALARM_RESET.slice());
     } else if(m.type=="rmuEmulation") {
         rmuEmulation = m.data!==false;
         if(rmuEmulation===false) {

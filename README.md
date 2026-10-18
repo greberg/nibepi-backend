@@ -95,6 +95,7 @@ with an error.
 | `NIBEPI_MQTT_PASS` | `mqtt.pass` | |
 | `NIBEPI_MQTT_TOPIC` | `mqtt.topic`; a trailing `/` is added if missing | `nibe/modbus/` |
 | `NIBEPI_MQTT_DISCOVERY` | `mqtt.discovery`: `true` or `false` | `false` |
+| `NIBEPI_RESET_ALARM_ON_START` | `system.reset_alarm_on_start`: `true` resets pump alarms in the first write slots after connecting, like the original NibePi | `false` |
 | `NIBEPI_RAW_SET` | `gateway.raw_set`: `all`, `none` or `47011,47041,...` | `all` |
 | `NIBEPI_LOG_LEVEL` | `error`, `warn`, `info`, `debug`, `trace` (raw bus frames) | `info` |
 | `NIBEPI_LOG_FILE` | also append the log to this file, rotated at 5 MB | (off) |
@@ -288,6 +289,14 @@ has connected and once a minute after that; when it holds 251 it writes
 45171 = 1 (alarm reset) and reads 45001 again 30 s later. Other alarms are
 never acknowledged. `system.reset_alarms` in config.json overrides the
 list, e.g. `[251]` (default) or `[]` to switch the reset off.
+
+Some pumps (an F1255 among them) refuse that reset once they have settled,
+and only clear alarm 251 when the reset comes in the very first write slots
+after the gateway connects. That is what the original NibePi did on every
+start. `NIBEPI_RESET_ALARM_ON_START=true` (`system.reset_alarm_on_start`)
+does the same: alarm reset first, then the word order, then the reset
+again. It also acknowledges any other alarm that is active at that moment;
+the log says when it happens and whether the pump accepted the reset.
 
 ## Supported pumps
 

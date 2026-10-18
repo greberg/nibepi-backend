@@ -145,3 +145,10 @@ test('an old config keeps its unknown keys and its own values', () => {
     assert.deepEqual(saved.system, Object.assign({}, old.system));
     assert.equal(saved.connection.series, 'fSeries');
 });
+
+test('NIBEPI_RESET_ALARM_ON_START sets system.reset_alarm_on_start', () => {
+    assert.deepEqual(byPath(readOverrides({NIBEPI_RESET_ALARM_ON_START: 'TRUE'}).overrides), {'system.reset_alarm_on_start': true});
+    assert.deepEqual(byPath(readOverrides({NIBEPI_RESET_ALARM_ON_START: 'false'}).overrides), {'system.reset_alarm_on_start': false});
+    assert.deepEqual(readOverrides({NIBEPI_RESET_ALARM_ON_START: ''}), {overrides: [], errors: []});
+    assert.strictEqual(readOverrides({NIBEPI_RESET_ALARM_ON_START: 'yes'}).errors.length, 1);
+});
