@@ -42,6 +42,29 @@ function applyEnvironment() {
     return true;
 }
 
+// NIBEPI_REGISTERS: polled and published like registers added with
+// <topic><register>/add (and kept in config.json the same way). Called each
+// time the core connects, once the model's register table is loaded.
+const extraRegisters = Env.registerList(process.env);
+for (const error of extraRegisters.errors) log.error('Config', error);
+const reportedUnknown = new Set();
+function pollConfiguredRegisters() {
+    const table = nibe.getRegister();
+    const added = [];
+    for (const reg of extraRegisters.registers) {
+        if(!table.some(item => String(item.register)===reg)) {
+            if(!reportedUnknown.has(reg)) {
+                reportedUnknown.add(reg);
+                log.warn('Register', `NIBEPI_REGISTERS: ${reg} is not a register of the ${nibe.getConfig().system.pump}`);
+            }
+            continue;
+        }
+        nibe.addRegister(reg);
+        added.push(reg);
+    }
+    if(added.length!==0) log.info('Register', `Polling ${added.length} registers from NIBEPI_REGISTERS`);
+}
+
 // The first start only: the backend supervises and restarts the core itself.
 function startCore() {
     const config = nibe.getConfig();
@@ -49,6 +72,7 @@ function startCore() {
     const onReady = (err) => {
         if(err) log.error('Core', err);
         log.info('Core', `Nibe ${nibe.getConfig().system.pump} is connected`);
+        pollConfiguredRegisters();
     };
     if(mode==='serial') {
         const port = typeof config.serial.port==='string' ? config.serial.port.trim() : '';

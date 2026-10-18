@@ -95,6 +95,7 @@ with an error.
 | `NIBEPI_MQTT_PASS` | `mqtt.pass` | |
 | `NIBEPI_MQTT_TOPIC` | `mqtt.topic`; a trailing `/` is added if missing | `nibe/modbus/` |
 | `NIBEPI_MQTT_DISCOVERY` | `mqtt.discovery`: `true` or `false` | `false` |
+| `NIBEPI_REGISTERS` | registers always polled and published on `<topic><register>`, comma or space separated; added to `registers` in config.json like `<register>/add`; unknown ones are logged | — |
 | `NIBEPI_RESET_ALARM_ON_START` | `system.reset_alarm_on_start`: `true` resets pump alarms in the first write slots after connecting, like the original NibePi | `false` |
 | `NIBEPI_RAW_SET` | `gateway.raw_set`: `all`, `none` or `47011,47041,...` | `all` |
 | `NIBEPI_LOG_LEVEL` | `error`, `warn`, `info`, `debug`, `trace` (raw bus frames) | `info` |

@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { readOverrides, configDir, healthFile, parseRawSet, uiOptions, buildId } = require('../lib/env');
+const { readOverrides, configDir, healthFile, parseRawSet, uiOptions, buildId, registerList } = require('../lib/env');
 
 test('build id', () => {
     assert.equal(buildId({}), null);
@@ -151,4 +151,11 @@ test('NIBEPI_RESET_ALARM_ON_START sets system.reset_alarm_on_start', () => {
     assert.deepEqual(byPath(readOverrides({NIBEPI_RESET_ALARM_ON_START: 'false'}).overrides), {'system.reset_alarm_on_start': false});
     assert.deepEqual(readOverrides({NIBEPI_RESET_ALARM_ON_START: ''}), {overrides: [], errors: []});
     assert.strictEqual(readOverrides({NIBEPI_RESET_ALARM_ON_START: 'yes'}).errors.length, 1);
+});
+
+test('NIBEPI_REGISTERS lists registers to poll', () => {
+    assert.deepEqual(registerList({}), {registers: [], errors: []});
+    assert.deepEqual(registerList({NIBEPI_REGISTERS: ''}), {registers: [], errors: []});
+    assert.deepEqual(registerList({NIBEPI_REGISTERS: '40004, 40008 40012,40004'}).registers, ['40004', '40008', '40012']);
+    assert.strictEqual(registerList({NIBEPI_REGISTERS: '40004,abc'}).errors.length, 1);
 });
