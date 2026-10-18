@@ -1750,9 +1750,10 @@ let gatewayTimer = setInterval(() => {
 // and listeners such as the alarm reset get the result.
 const onWriteResult = (result) => {
     const reg = result.register;
+    // Warnings, so they show in the status page's default (warn) log view.
     if(result.ok===false) log.warn('Write',`The pump refused the write to register ${reg} (NAK)`);
-    else if(String(reg)==='45171') log.info('Write',`Alarm reset: the pump ${result.ok===true ? 'accepted it (ACK)' : 'did not answer'}`);
-    else if(result.ok===null) log.debug('Write',`No answer from the pump to the write to register ${reg}`);
+    else if(String(reg)==='45171') log.warn('Write',`Alarm reset: the pump ${result.ok===true ? 'accepted it (ACK)' : 'did not answer'}`);
+    else if(result.ok===null) log.warn('Write',`No answer from the pump to the write to register ${reg}`);
     else log.debug('Write',`The pump accepted the write to register ${reg}`);
     nibeEmit.emit('writeResult_'+reg, result.ok);
 };
