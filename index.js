@@ -1771,11 +1771,17 @@ const checkCommsAlarm = (reason) => {
         if(!alarm.shouldReset(raw, alarm.resetAlarmList(config), alarmCheck.lastResetAt, Date.now(), alarm.gapAfter(alarmCheck.failures))) return;
         alarmCheck.lastResetAt = Date.now();
         log.warn('Pump',`Alarm ${raw} active (${reason}), resetting it (attempt ${alarmCheck.failures+1})`);
-        nibeEmit.once('writeResult_45171', (ok) => {
-            const answer = ok===true ? 'accepted (ACK)' : ok===false ? 'REFUSED (NAK)' : 'did not answer';
-            log.info('Pump',`The pump ${answer} the alarm reset`);
-        });
-        setData(45171, 1, (err) => {
+        // 45171 may act on a change to 1 only: a 1 left from an earlier
+        // reset would make another 1 a no-op. Log it, then write 0 and 1.
+        const writeReset = (cb) => {
+            setData(45171, 0, (err0) => {
+                if(err0) log.warn('Pump',`Writing 0 to the alarm reset failed: ${err0.message || err0}`);
+                setData(45171, 1, cb);
+            });
+        };
+        reqData(45171).then(before => {
+            log.warn('Pump',`Alarm reset register 45171 holds ${before!==undefined ? before.raw_data : 'nothing'} before the reset`);
+        }).catch(logCatch).finally(() => writeReset((err) => {
             if(err) return log.error('Pump',`Could not reset alarm ${raw}: ${err.message || err}`);
             setTimeout(() => {
                 reqData(45001).then(after => {
@@ -1790,7 +1796,7 @@ const checkCommsAlarm = (reason) => {
                     }
                 }).catch(logCatch);
             }, 30000);
-        });
+        }));
     }).catch(logCatch).finally(() => { alarmCheck.running = false; });
 };
 // Clean stop for gateway.js. Nothing is released or restored: the persisted
@@ -1821,7 +1827,7 @@ const shutdown = async () => {
 // A read-only snapshot for the status page (lib/webui.js), which shapes and
 // redacts it. Register values come from the cache; nothing is read from the
 // pump here.
-const STATUS_REGISTERS = ['40004','40008','40012','40013','40014','40033','47011','43086'];
+const STATUS_REGISTERS = ['40004','40008','40012','40013','40014','40033','47011','43086','45001','45171'];
 const cachedValue = (reg) => {
     const item = register.find(item => item.register == reg);
     if(item===undefined) return null;
