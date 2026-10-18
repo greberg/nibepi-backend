@@ -284,19 +284,20 @@ For wiring (12 V, A, B, GND), see Nibe's documentation:
 ### Communication alarm after a restart
 
 While the gateway restarts, the pump gets no answers from its MODBUS40
-accessory and raises alarm 251. The gateway checks register 45001 when it
-has connected and once a minute after that; when it holds 251 it writes
-45171 = 1 (alarm reset) and reads 45001 again 30 s later. Other alarms are
-never acknowledged. `system.reset_alarms` in config.json overrides the
+accessory and raises alarm 251 ("Kom.avb Modbus"). The gateway checks
+register 45001 when it has connected and once a minute after that; when it
+holds 251 it writes 45171 = 0 and then 1 (alarm reset) and reads 45001
+again 30 s later. The pump resets on a change of 45171 to 1: it keeps the 1
+from the previous reset, and another 1 is acknowledged but does nothing
+(verified on an F1255). Other alarms are never acknowledged. `system.reset_alarms` in config.json overrides the
 list, e.g. `[251]` (default) or `[]` to switch the reset off.
 
-Some pumps (an F1255 among them) refuse that reset once they have settled,
-and only clear alarm 251 when the reset comes in the very first write slots
-after the gateway connects. That is what the original NibePi did on every
-start. `NIBEPI_RESET_ALARM_ON_START=true` (`system.reset_alarm_on_start`)
-does the same: alarm reset first, then the word order, then the reset
-again. It also acknowledges any other alarm that is active at that moment;
-the log says when it happens and whether the pump accepted the reset.
+`NIBEPI_RESET_ALARM_ON_START=true` (`system.reset_alarm_on_start`) also
+does what the original NibePi did on every start: alarm reset (1) as the
+first write, then the word order, then the reset again. It acknowledges
+any alarm active at that moment, and it only works when 45171 does not
+already hold 1, so the targeted reset above is the one to rely on; leave
+it off unless you have a reason.
 
 ## Supported pumps
 
