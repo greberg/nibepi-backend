@@ -195,6 +195,14 @@ const modelKnown = () => {
     }
     // A restart leaves the pump with a MODBUS alarm: check it right away.
     setTimeout(() => checkCommsAlarm('start'), 5000);
+    // Regular polling used to start only on the pump's first LOG.SET frame
+    // (0x68). A pump without a LOG.SET never sends one, so registers were
+    // only read when someone asked: BT2, BT3, BT6 every ~30 min.
+    setTimeout(() => startRegularPolling(), 3000);
+};
+const startRegularPolling = () => {
+    if(!Array.isArray(config.registers)) return;
+    for (const reg of config.registers) addRegular(reg);
 };
 process.on('exit', (code) => {
     log.info('System',`NibePi stopping (exit code ${code})`);
@@ -1011,6 +1019,10 @@ const addRegister = (address,logset=false) => {
                 addRegular(address);
             }
             updateConfig()
+        } else if(logset===false) {
+            // Already in config.json but maybe not polled since this start
+            // (addRegular skips one that is queued or pushed by the pump).
+            addRegular(address);
         }
     }
     }
