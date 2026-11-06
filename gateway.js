@@ -16,6 +16,7 @@ const Env = require('./lib/env');
 const log = require('./log');
 const nibe = require('./index.js');
 const WebUI = require('./lib/webui');
+const { createLagMonitor } = require('./lib/lag');
 
 const HEALTH_FILE = Env.healthFile();
 const HEALTH_MS = 60000;
@@ -131,6 +132,7 @@ function startMQTT() {
 // Same format config_node.js used, so the Docker HEALTHCHECK keeps working;
 // there are no controllers here.
 let healthErrorShown = false;
+let healthWriting = false;
 function writeHealth() {
     let health;
     try { health = nibe.getHealth(); } catch(err) { health = {}; }
@@ -143,8 +145,14 @@ function writeHealth() {
         busHealth: health.busHealth!==undefined ? health.busHealth : null,
         controllers: {}
     };
+    // One write at a time: when the system stalls, a write can still be
+    // running at the next tick, and two writes sharing the .tmp file made
+    // the second rename fail with ENOENT (a misleading warning).
+    if(healthWriting===true) return;
+    healthWriting = true;
     const tmp = HEALTH_FILE+'.tmp';
     const failed = (err) => {
+        healthWriting = false;
         if(healthErrorShown===true) return;
         healthErrorShown = true;
         log.warn('Health', `Could not write ${HEALTH_FILE} (set NIBEPI_HEALTH_FILE): ${err.message}`);
@@ -153,6 +161,7 @@ function writeHealth() {
         if(err) return failed(err);
         fs.rename(tmp, HEALTH_FILE, (err) => {
             if(err) return failed(err);
+            healthWriting = false;
             healthErrorShown = false;
         });
     });
@@ -225,4 +234,7 @@ startMQTT();
 startUI();
 healthTimer = setInterval(writeHealth, HEALTH_MS);
 writeHealth();
+createLagMonitor({
+    onLag: (lag) => log.warn('System', `The gateway was blocked for ${(lag / 1000).toFixed(1)} s: the Pi itself stalled (CPU, memory/swap, power or SD card), the pump got no answers meanwhile`),
+}).start();
 log.info('System', 'NibePi gateway started');
