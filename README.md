@@ -150,7 +150,7 @@ contract, including the rationale for leases, is in
 | `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, neutral_from, owner, error` |
 | `Tsetting/<reg>/set` | → gateway, **not retained** | a permanent pump setting: `55` or `{"value": 55}`; see [Settings](#settings) |
 | `Tsetting/<reg>/result` | gateway →, not retained | `ok, value, deferred (lease / interval), owner, wait_s, error, at` |
-| `Tgateway/state` | gateway →, retained, per minute | `version, build, leases, raw_set, core, lastData` |
+| `Tgateway/state` | gateway →, retained, per minute | `version, build, leases, raw_set, settings, core, lastData` |
 | `homeassistant/device/nibepi_<id>/config` | gateway →, retained | discovery, when `mqtt.discovery` is `true` |
 
 ### Leases
