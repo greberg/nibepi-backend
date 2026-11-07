@@ -1555,6 +1555,20 @@ function onLeaseMessage(topic, message, packet) {
     const job = action==='set' ? leases.acquire(reg,message) : leases.release(reg);
     job.catch(err => gatewayLog(`Lease ${reg}: ${err && err.message ? err.message : err}`));
 }
+// <topic>setting/<reg>/set: a permanent change of a pump setting (the hot
+// water stop temperatures, lib/lease.js DEFAULT_SETTINGS), independent of
+// raw_set; while a lease holds the register it becomes the lease's
+// baseline. The result goes to setting/<reg>/result. Retained requests are
+// ignored like lease requests.
+function onSettingMessage(topic, message, packet) {
+    if(topic.length!==3 || !/^\d+$/.test(topic[1]) || topic[2]!=='set') return; // incl. our own .../result
+    const reg = topic[1];
+    if(packet!==undefined && packet.retain===true) {
+        if(message.length!==0) logRefusal('setting'+reg,`retained setting/${reg}/set ignored, setting requests must not be retained`);
+        return;
+    }
+    leases.setting(reg,message).catch(err => gatewayLog(`Setting ${reg}: ${err && err.message ? err.message : err}`));
+}
 // Incoming MQTT messages: Home Assistant status, old discovery objects,
 // leases and <topic><register>/set|get|add|remove.
 function onMQTTMessage(topic, message, packet) {
@@ -1574,6 +1588,8 @@ function onMQTTMessage(topic, message, packet) {
         // topics come back through the <topic># subscription.
         if(topic[0]==="lease") {
             onLeaseMessage(topic, message, packet);
+        } else if(topic[0]==="setting") {
+            onSettingMessage(topic, message, packet);
         } else if(topic[0]==="gateway") {
             // gateway/state, published here
         } else if(topic[0]=="adjust_s1") {
@@ -1700,6 +1716,7 @@ const publishGatewayState = () => {
         build: nibepi_build,
         leases: leases.summary(),
         raw_set: rawSet===undefined ? "all" : rawSet,
+        settings: Object.keys(leases.settings).sort(),
         core: coreState,
         lastData: lastData
     }),true);
@@ -1739,6 +1756,11 @@ leases = new Lease.LeaseManager({
         });
     },
     publish: publishLeaseState,
+    publishSetting: (reg,result) => {
+        publishMQTT(config.mqtt.topic+'setting/'+reg+'/result',JSON.stringify(result),false);
+        // The new value on the bus at once, not at the next poll.
+        if(result.ok===true && result.deferred===undefined) reqData(reg).catch(logCatch);
+    },
     fault: (message) => nibeEmit.emit('fault',{from:"Gateway",message:message}),
     log: gatewayLog,
     neutral: (reg,spec) => Lease.neutralValue(spec,config)

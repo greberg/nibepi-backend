@@ -2,7 +2,7 @@
 // Lease state machine with a fake clock and a fake pump: node --test test/
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LeaseManager, buildTable, neutralValue, parseRequest, rawSetRefusal, roundToFactor, rmuRefusal } = require('../lib/lease');
+const { LeaseManager, buildTable, neutralValue, parseRequest, parseSetting, rawSetRefusal, roundToFactor, rmuRefusal } = require('../lib/lease');
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -33,7 +33,7 @@ function setup(opts={}) {
     const h = {
         clock: new FakeClock(),
         pump: Object.assign({'47011':1, '47010':0, '47041':1, '48132':0, '47047':50, '10060':20, '47398':20.5}, opts.pump),
-        writes: [], reads: [], persisted: [], states: [], faults: [], failWrites: 0, failReads: 0
+        writes: [], reads: [], persisted: [], states: [], faults: [], settings: [], failWrites: 0, failReads: 0
     };
     // Register factors as in the model files; other registers are not rounded.
     const factors = {'10060':10, '47398':10, '47047':10};
@@ -54,6 +54,7 @@ function setup(opts={}) {
         normalize: (reg, value) => roundToFactor(value, factors[reg]),
         persist: async (baselines) => { h.persisted.push(baselines); },
         publish: (reg, state) => h.states.push([reg, state]),
+        publishSetting: (reg, result) => h.settings.push([reg, result]),
         fault: (message) => h.faults.push(message),
         neutral: (reg, spec) => neutralValue(spec, {home:{adjust_s1:2, adjust_s2:'x'}})
     });
@@ -478,4 +479,66 @@ test('raw /set policy', () => {
     assert.match(rawSetRefusal([47011], '48132', null), /not in gateway.raw_set/);
     assert.match(rawSetRefusal([47011], '47011', 'ha'), /leased/);
     assert.match(rawSetRefusal('some', '47011', null), /not "all"/);
+});
+
+test('parseSetting takes a number or {"value": n}', () => {
+    assert.equal(parseSetting('55'), 55);
+    assert.equal(parseSetting(Buffer.from(' 52.5 ')), 52.5);
+    assert.equal(parseSetting('{"value": 55}'), 55);
+    assert.equal(parseSetting({value:'54'}), 54);
+    assert.throws(() => parseSetting(''), /empty/);
+    assert.throws(() => parseSetting('hot'), /not a number/);
+    assert.throws(() => parseSetting('{"value": null}'), /finite/);
+});
+
+test('a setting is written for good, within its limits', async () => {
+    const h = setup();
+    const res = await h.m.setting('47047', '55');
+    assert.equal(res.ok, true);
+    assert.deepEqual(h.writes, [['47047', 55]]);
+    assert.equal(h.m.state('47047').active, false, 'no lease, nothing restored later');
+    assert.deepEqual(h.persisted, [], 'no baseline on the SD card');
+    assert.equal(h.settings.at(-1)[1].ok, true);
+    const low = await h.m.setting('47047', '40');
+    assert.equal(low.ok, false);
+    assert.match(low.error, /outside 45\.\.65/);
+    const other = await h.m.setting('47011', '2');
+    assert.equal(other.ok, false);
+    assert.match(other.error, /not a setting/);
+    assert.equal(h.writes.length, 1);
+});
+
+test('a setting during a lease becomes the value the lease restores', async () => {
+    const h = setup();
+    await h.m.acquire('47047', lease(65));                // a legionella cycle
+    assert.deepEqual(h.writes, [['47047', 65]]);
+    const res = await h.m.setting('47047', '55');
+    assert.equal(res.ok, true);
+    assert.equal(res.deferred, 'lease');
+    assert.deepEqual(h.writes, [['47047', 65]], 'the lease value stays');
+    assert.equal(h.m.state('47047').baseline, 55);
+    assert.deepEqual(h.persisted.at(-1), {'47047':55}, 'survives a gateway restart');
+    await h.m.release('47047');
+    assert.deepEqual(h.writes.at(-1), ['47047', 55]);
+});
+
+test('a setting refuses a lease that restores a fixed value', async () => {
+    const h = setup();
+    h.m.settings['48132'] = {min:0, max:4};
+    await h.m.acquire('48132', lease(4));
+    const res = await h.m.setting('48132', '2');
+    assert.equal(res.ok, false);
+    assert.match(res.error, /fixed value/);
+});
+
+test('settings close together are written once per interval, the last one wins', async () => {
+    const h = setup();
+    await h.m.setting('47047', '55');
+    await h.clock.advance(5000);
+    const second = await h.m.setting('47047', '56');
+    assert.equal(second.deferred, 'interval');
+    await h.m.setting('47047', '57');
+    assert.deepEqual(h.writes, [['47047', 55]]);
+    await h.clock.advance(25000);
+    assert.deepEqual(h.writes, [['47047', 55], ['47047', 57]]);
 });

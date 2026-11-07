@@ -148,6 +148,8 @@ contract, including the rationale for leases, is in
 | `Tlease/<reg>/set` | → gateway, **not retained** | `{"value": -2, "ttl": 900, "owner": "ha"}` |
 | `Tlease/<reg>/release` | → gateway, not retained | anything |
 | `Tlease/<reg>/state` | gateway →, retained | `active, restoring, value, written, expires, baseline, neutral, neutral_from, owner, error` |
+| `Tsetting/<reg>/set` | → gateway, **not retained** | a permanent pump setting: `55` or `{"value": 55}`; see [Settings](#settings) |
+| `Tsetting/<reg>/result` | gateway →, not retained | `ok, value, deferred (lease / interval), owner, wait_s, error, at` |
 | `Tgateway/state` | gateway →, retained, per minute | `version, build, leases, raw_set, core, lastData` |
 | `homeassistant/device/nibepi_<id>/config` | gateway →, retained | discovery, when `mqtt.discovery` is `true` |
 
@@ -202,6 +204,26 @@ pump never keeps acting on a frozen reading.
 - a list of registers: only those
 
 A leased register always refuses plain writes.
+
+## Settings
+
+`setting/<reg>/set` changes a pump setting for good, apart from the raw
+`/set` policy (so it works with `raw_set: "none"`). Only these registers,
+within these limits:
+
+| Register | Setting | Limits |
+| --- | --- | --- |
+| 47049 | hot water stop temperature, economy | 35–55 °C |
+| 47048 | hot water stop temperature, normal | 40–60 °C |
+| 47047 | hot water stop temperature, luxury | 45–65 °C |
+
+The value is written at once, and the register read back. While a lease
+holds the register (47047 during a legionella cycle), the value becomes
+the lease's baseline instead: the restore at the end of the lease writes
+it, and a gateway restart in between keeps it. One write per register per
+30 s; values in between wait, and the last one wins. `gateway/state` lists
+the setting registers (`settings`), so a client can tell whether the
+gateway supports them.
 
 ## Health file
 
